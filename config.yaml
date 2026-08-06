@@ -1,24 +1,42 @@
+# Default global detector parameters
 percentile: 97.5
 min_events_in_box: 6
 open_kernel: 2
 dilate_kernel: 3
 min_hits: 2
-max_dist_frac: 0.05
+box_mode: "scale"
+centroid_mode: "component"
 
-# General defaults
-box_scale: 2.0
-box_pad: 4.0
+# Per-sensor optimal parameter overrides
+EVK4:
+  percentile: 97.5
+  min_events_in_box: 8
+  open_kernel: 1
+  dilate_kernel: 3
+  min_hits: 2
+  box_mode: "fixed"
+  centroid_mode: "component"
+  box_w: 52
+  box_h: 56
 
-# Sensor resolution-adaptive scaling parameters
-box_scale_evk4: 3.8
-box_pad_evk4: 10.0
-box_scale_dvx: 1.5
-box_pad_dvx: 4.0
-box_scale_davis: 1.1
-box_pad_davis: 1.5
+DVX:
+  percentile: 97.5
+  min_events_in_box: 6
+  open_kernel: 2
+  dilate_kernel: 3
+  min_hits: 2
+  box_mode: "scale"
+  centroid_mode: "component"
+  box_scale: 1.5
+  box_pad: 4.0
 
-confidence_weights:
-  density: 0.25
-  events: 0.35
-  compactness: 0.20
-  persistence: 0.20
+DAVIS:
+  percentile: 97.5
+  min_events_in_box: 6
+  open_kernel: 2
+  dilate_kernel: 3
+  min_hits: 2
+  box_mode: "scale"
+  centroid_mode: "component"
+  box_scale: 1.1
+  box_pad: 1.5

@@ -1,4 +1,4 @@
-"""Hyper-parameter grid search harness with connected-component caching and per-sensor evaluation."""
+"""Hyper-parameter grid search harness with memory-efficient component caching."""
 
 import argparse
 from copy import deepcopy
@@ -9,7 +9,7 @@ from pathlib import Path
 import sys
 import time
 from typing import Any, Dict, List, Tuple
-import yaml
+import cv2
 import numpy as np
 from tabulate import tabulate
 
@@ -21,166 +21,367 @@ from src.common import (
     load_events,
     sequence_name_from_npy,
 )
-from src.detector import detect_boxes
 from src.metrics import evaluate_sequence
 
 
+def _parse_yaml_scalar(val_str: str) -> Any:
+    """Helper to parse scalar strings into int, float, or bool values."""
+    val_clean = val_str.strip("'\"")
+    if not val_clean:
+        return ""
+    try:
+        if "." in val_clean or "e" in val_clean.lower():
+            return float(val_clean)
+        return int(val_clean)
+    except ValueError:
+        if val_clean.lower() in ("true", "yes"):
+            return True
+        if val_clean.lower() in ("false", "no"):
+            return False
+        return val_clean
+
+
+def _parse_yaml_list_or_scalar(val_str: str) -> Any:
+    """Parse inline YAML list [a, b, c] or scalar value."""
+    val_clean = val_str.strip()
+    if val_clean.startswith("[") and val_clean.endswith("]"):
+        items = val_clean[1:-1].split(",")
+        return [_parse_yaml_scalar(item.strip()) for item in items if item.strip()]
+    return _parse_yaml_scalar(val_clean)
+
+
 def load_grid_config(grid_path: Path) -> Dict[str, Any]:
-    """Load parameter grid configuration file."""
+    """Load parameter grid configuration file with zero-dependency fallback parser."""
     if not grid_path.exists():
         print(f"Error: Grid file '{grid_path}' does not exist.", file=sys.stderr)
         sys.exit(1)
-    with open(grid_path, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f) or {}
+
+    try:
+        import yaml
+
+        with open(grid_path, "r", encoding="utf-8") as f:
+            return yaml.safe_load(f) or {}
+    except ImportError:
+        cfg: Dict[str, Any] = {}
+        current_section: str = ""
+
+        with open(grid_path, "r", encoding="utf-8") as f:
+            for line in f:
+                raw = line.split("#")[0].rstrip("\r\n")
+                if not raw.strip():
+                    continue
+
+                indent = len(raw) - len(raw.lstrip(" "))
+                stripped = raw.strip()
+
+                if ":" not in stripped:
+                    continue
+
+                parts = stripped.split(":", 1)
+                key = parts[0].strip()
+                val_str = parts[1].strip()
+
+                if indent == 0:
+                    if not val_str:
+                        current_section = key
+                        cfg[key] = {}
+                    else:
+                        current_section = ""
+                        cfg[key] = _parse_yaml_list_or_scalar(val_str)
+                elif indent > 0 and current_section:
+                    if not isinstance(cfg.get(current_section), dict):
+                        cfg[current_section] = {}
+                    cfg[current_section][key] = _parse_yaml_list_or_scalar(val_str)
+
+        return cfg
 
 
-def extract_sensor_grid(
-    raw_grid: Dict[str, Any], sensor_name: str
-) -> Tuple[List[Dict[str, Any]], Dict[str, List[Any]]]:
-    """Extract global threshold parameters and sensor-specific geometry parameters."""
-    thresh_params = {
-        "percentile": raw_grid.get("percentile", [97.5]),
-        "min_events_in_box": raw_grid.get("min_events_in_box", [6]),
-        "open_kernel": raw_grid.get("open_kernel", [2]),
-        "dilate_kernel": raw_grid.get("dilate_kernel", [3]),
-    }
+def extract_raw_components(
+    count_img: np.ndarray,
+    percentile: float,
+    open_k: int,
+    dilate_k: int,
+    width: int,
+    height: int,
+) -> List[Dict[str, float]]:
+    """Extract raw connected component properties from a 2D count image fast."""
+    nonzero_vals = count_img[count_img > 0]
+    num_nonzero = len(nonzero_vals)
+    if num_nonzero < 4:
+        return []
 
-    global_combos = [
-        dict(zip(thresh_params.keys(), v))
-        for v in itertools.product(*thresh_params.values())
-    ]
+    if num_nonzero > 1000:
+        actual_perc = min(99.0, percentile + (num_nonzero - 1000) / 500.0)
+    else:
+        actual_perc = percentile
 
-    sensor_block = raw_grid.get(sensor_name, {})
-    geom_params = {
-        "min_hits": raw_grid.get("min_hits", [2]),
-        "box_mode": raw_grid.get("box_mode", ["scale", "fixed"]),
-        "centroid_mode": raw_grid.get("centroid_mode", ["component", "weighted"]),
-        "box_scale": sensor_block.get("box_scale", [2.0]),
-        "box_pad": sensor_block.get("box_pad", [4.0]),
-        "box_w": sensor_block.get("box_w", [14]),
-        "box_h": sensor_block.get("box_h", [14]),
-    }
+    raw_thresh = float(np.percentile(nonzero_vals, actual_perc))
+    thresh = max(1.0, raw_thresh)
 
-    return global_combos, geom_params
+    binary = (count_img >= thresh).astype(np.uint8)
+    if not np.any(binary):
+        return []
+
+    if open_k > 1:
+        kernel_open = cv2.getStructuringElement(cv2.MORPH_RECT, (open_k, open_k))
+        binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel_open)
+
+    if dilate_k > 1:
+        kernel_dilate = cv2.getStructuringElement(cv2.MORPH_RECT, (dilate_k, dilate_k))
+        binary = cv2.dilate(binary, kernel_dilate)
+
+    if not np.any(binary):
+        return []
+
+    num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(
+        binary, connectivity=8
+    )
+
+    max_area = 0.02 * width * height
+    comps: List[Dict[str, float]] = []
+
+    for label_idx in range(1, num_labels):
+        comp_area = float(stats[label_idx, cv2.CC_STAT_AREA])
+        if comp_area > max_area:
+            continue
+
+        x_box = int(stats[label_idx, cv2.CC_STAT_LEFT])
+        y_box = int(stats[label_idx, cv2.CC_STAT_TOP])
+        w_box = int(stats[label_idx, cv2.CC_STAT_WIDTH])
+        h_box = int(stats[label_idx, cv2.CC_STAT_HEIGHT])
+
+        # Slice bounding box region for O(box_area) intensity weighting
+        sub_img = count_img[y_box : y_box + h_box, x_box : x_box + w_box]
+        sub_labels = labels[y_box : y_box + h_box, x_box : x_box + w_box]
+        sub_mask = sub_labels == label_idx
+
+        comp_events = float(sub_img[sub_mask].sum())
+
+        center_comp_x = float(centroids[label_idx, 0])
+        center_comp_y = float(centroids[label_idx, 1])
+
+        if comp_events > 0:
+            ys, xs = np.where(sub_mask)
+            weights = sub_img[sub_mask]
+            center_w_x = float(x_box + (xs * weights).sum() / comp_events)
+            center_w_y = float(y_box + (ys * weights).sum() / comp_events)
+        else:
+            center_w_x = center_comp_x
+            center_w_y = center_comp_y
+
+        comps.append(
+            {
+                "x_box": float(x_box),
+                "y_box": float(y_box),
+                "w_box": float(w_box),
+                "h_box": float(h_box),
+                "area": comp_area,
+                "events": comp_events,
+                "cx_comp": center_comp_x,
+                "cy_comp": center_comp_y,
+                "cx_weighted": center_w_x,
+                "cy_weighted": center_w_y,
+            }
+        )
+
+    return comps
 
 
-def generate_full_combos(
-    global_combos: List[Dict[str, Any]], geom_params: Dict[str, List[Any]]
-) -> List[Dict[str, Any]]:
-    """Cartesian product of threshold combos and geometry combos."""
-    geom_keys = list(geom_params.keys())
-    geom_combos = [
-        dict(zip(geom_keys, v))
-        for v in itertools.product(*[geom_params[k] for k in geom_keys])
-    ]
-
-    full_combos = []
-    for g_thresh in global_combos:
-        for g_geom in geom_combos:
-            combo = deepcopy(g_thresh)
-            combo.update(g_geom)
-            full_combos.append(combo)
-    return full_combos
-
-
-def run_sequence_sweep(
+def run_sequence_sweep_cached(
     npy_path: Path,
     gt_rows: List[Tuple[int, int, int, int, int, int]],
-    full_combos: List[Dict[str, Any]],
+    raw_grid: Dict[str, Any],
     sensor_name: str,
+    max_windows: float = float("inf"),
 ) -> List[Dict[str, Any]]:
-    """Process a single sequence across parameter combinations."""
+    """Memory-efficient sequence processing with component caching."""
     seq_name = sequence_name_from_npy(npy_path)
     events = load_events(npy_path)
     width, height = infer_resolution(seq_name, events[:, 0], events[:, 1])
 
-    # Pre-generate 2D window count images once
-    window_data: List[Tuple[int, int, np.ndarray]] = []
+    percentile_list = raw_grid.get("percentile", [97.5])
+    open_k_list = raw_grid.get("open_kernel", [2])
+    dilate_k_list = raw_grid.get("dilate_kernel", [3])
+    thresh_combos = list(
+        itertools.product(percentile_list, open_k_list, dilate_k_list)
+    )
+
+    comp_cache: Dict[Tuple[float, int, int], List[Tuple[int, int, List[Dict[str, float]]]]] = {
+        tc: [] for tc in thresh_combos
+    }
+
+    win_count = 0
     for w_start, w_end, w_events in iter_windows(events, window_us=WINDOW_US):
         count_img, _, _ = event_image(w_events, width, height)
-        window_data.append((w_start, w_end, count_img))
+        for perc, open_k, dilate_k in thresh_combos:
+            c_list = extract_raw_components(
+                count_img, perc, open_k, dilate_k, width, height
+            )
+            comp_cache[(perc, open_k, dilate_k)].append((w_start, w_end, c_list))
+        del count_img
+        win_count += 1
+        if win_count >= max_windows:
+            break
 
-    num_windows = len(window_data)
+    num_windows = len(comp_cache[thresh_combos[0]])
     diagonal = math.hypot(width, height)
+
+    min_events_list = raw_grid.get("min_events_in_box", [6])
+    min_hits_list = raw_grid.get("min_hits", [2])
+    box_mode_list = raw_grid.get("box_mode", ["scale", "fixed"])
+    centroid_mode_list = raw_grid.get("centroid_mode", ["component", "weighted"])
+
+    sensor_block = raw_grid.get(sensor_name, {})
+    box_scale_list = sensor_block.get("box_scale", [2.0])
+    box_pad_list = sensor_block.get("box_pad", [4.0])
+    box_w_list = sensor_block.get("box_w", [14])
+    box_h_list = sensor_block.get("box_h", [14])
 
     results: List[Dict[str, Any]] = []
 
-    for combo in full_combos:
-        start_time = time.perf_counter()
+    for (perc, open_k, dilate_k) in thresh_combos:
+        window_cached = comp_cache[(perc, open_k, dilate_k)]
 
-        # Build candidate boxes for each window
-        cfg = deepcopy(combo)
-        cfg[sensor_name] = {
-            "box_scale": combo["box_scale"],
-            "box_pad": combo["box_pad"],
-            "box_w": combo["box_w"],
-            "box_h": combo["box_h"],
-        }
+        for min_evt, min_hits, c_mode, b_mode in itertools.product(
+            min_events_list, min_hits_list, centroid_mode_list, box_mode_list
+        ):
+            if b_mode == "scale":
+                geom_tuples = [
+                    (s, p, box_w_list[0], box_h_list[0])
+                    for s, p in itertools.product(box_scale_list, box_pad_list)
+                ]
+            else:
+                geom_tuples = [
+                    (box_scale_list[0], box_pad_list[0], bw, bh)
+                    for bw, bh in itertools.product(box_w_list, box_h_list)
+                ]
 
-        window_boxes: List[Tuple[int, int, List[Dict[str, float]]]] = []
-        for w_start, w_end, count_img in window_data:
-            boxes = detect_boxes(count_img, width, height, cfg)
-            window_boxes.append((w_start, w_end, boxes))
+            for b_scale, b_pad, b_w, b_h in geom_tuples:
+                start_time = time.perf_counter()
 
-        # Persistence filtering
-        min_hits = combo["min_hits"]
-        max_dist = combo.get("max_dist_frac", 0.05) * diagonal
-        pred_rows: List[Tuple[int, int, int, int, int, int, float]] = []
+                combo = {
+                    "percentile": perc,
+                    "min_events_in_box": min_evt,
+                    "open_kernel": open_k,
+                    "dilate_kernel": dilate_k,
+                    "min_hits": min_hits,
+                    "box_mode": b_mode,
+                    "centroid_mode": c_mode,
+                    "box_scale": b_scale,
+                    "box_pad": b_pad,
+                    "box_w": b_w,
+                    "box_h": b_h,
+                }
 
-        for w_idx in range(num_windows):
-            w_start, w_end, boxes = window_boxes[w_idx]
-            if not boxes:
-                continue
+                window_boxes: List[Tuple[int, int, List[Dict[str, float]]]] = []
+                for w_idx in range(num_windows):
+                    w_start, w_end, raw_comps = window_cached[w_idx]
 
-            prev_boxes = window_boxes[w_idx - 1][2] if w_idx > 0 else []
-            next_boxes = (
-                window_boxes[w_idx + 1][2] if w_idx < num_windows - 1 else []
-            )
+                    boxes: List[Dict[str, float]] = []
+                    for comp in raw_comps:
+                        if comp["events"] < min_evt:
+                            continue
 
-            for box in boxes:
-                hits = 1
-                if any(
-                    math.hypot(
-                        box["center_x"] - p["center_x"],
-                        box["center_y"] - p["center_y"],
+                        cx = (
+                            comp["cx_weighted"]
+                            if c_mode == "weighted"
+                            else comp["cx_comp"]
+                        )
+                        cy = (
+                            comp["cy_weighted"]
+                            if c_mode == "weighted"
+                            else comp["cy_comp"]
+                        )
+
+                        if b_mode == "fixed":
+                            nw, nh = float(b_w), float(b_h)
+                        else:
+                            nw = comp["w_box"] * b_scale + 2.0 * b_pad
+                            nh = comp["h_box"] * b_scale + 2.0 * b_pad
+
+                        x1 = max(0.0, min(float(width), cx - nw / 2.0))
+                        y1 = max(0.0, min(float(height), cy - nh / 2.0))
+                        x2 = max(0.0, min(float(width), cx + nw / 2.0))
+                        y2 = max(0.0, min(float(height), cy + nh / 2.0))
+
+                        cw = max(3.0, x2 - x1)
+                        ch = max(3.0, y2 - y1)
+                        ccx = (x1 + x2) / 2.0
+                        ccy = (y1 + y2) / 2.0
+
+                        area_calc = cw * ch
+                        density = comp["events"] / area_calc if area_calc > 0 else 0.0
+
+                        boxes.append(
+                            {
+                                "center_x": ccx,
+                                "center_y": ccy,
+                                "width": cw,
+                                "height": ch,
+                                "events": comp["events"],
+                                "density": density,
+                            }
+                        )
+
+                    window_boxes.append((w_start, w_end, boxes))
+
+                max_dist = 0.05 * diagonal
+                pred_rows: List[Tuple[int, int, int, int, int, int, float]] = []
+
+                for w_idx in range(num_windows):
+                    w_start, w_end, boxes = window_boxes[w_idx]
+                    if not boxes:
+                        continue
+
+                    prev_b = window_boxes[w_idx - 1][2] if w_idx > 0 else []
+                    next_b = (
+                        window_boxes[w_idx + 1][2] if w_idx < num_windows - 1 else []
                     )
-                    <= max_dist
-                    for p in prev_boxes
-                ):
-                    hits += 1
-                if any(
-                    math.hypot(
-                        box["center_x"] - n["center_x"],
-                        box["center_y"] - n["center_y"],
-                    )
-                    <= max_dist
-                    for n in next_boxes
-                ):
-                    hits += 1
 
-                if min_hits >= 2 and hits < min_hits:
-                    continue
+                    for box in boxes:
+                        hits = 1
+                        if any(
+                            math.hypot(
+                                box["center_x"] - p["center_x"],
+                                box["center_y"] - p["center_y"],
+                            )
+                            <= max_dist
+                            for p in prev_b
+                        ):
+                            hits += 1
+                        if any(
+                            math.hypot(
+                                box["center_x"] - n["center_x"],
+                                box["center_y"] - n["center_y"],
+                            )
+                            <= max_dist
+                            for n in next_b
+                        ):
+                            hits += 1
 
-                cx = int(round(box["center_x"]))
-                cy = int(round(box["center_y"]))
-                bw = int(round(box["width"]))
-                bh = int(round(box["height"]))
-                conf = min(1.0, max(0.01, box["density"] * (hits / 3.0)))
+                        if min_hits >= 2 and hits < min_hits:
+                            continue
 
-                pred_rows.append((w_start, w_end, cx, cy, bw, bh, conf))
+                        rcx = int(round(box["center_x"]))
+                        rcy = int(round(box["center_y"]))
+                        rbw = int(round(box["width"]))
+                        rbh = int(round(box["height"]))
+                        conf = min(1.0, max(0.01, box["density"] * (hits / 3.0)))
 
-        eval_res = evaluate_sequence(gt_rows, pred_rows)
-        elapsed_ms = (time.perf_counter() - start_time) * 1000.0
+                        pred_rows.append((w_start, w_end, rcx, rcy, rbw, rbh, conf))
 
-        results.append(
-            {
-                "combo": combo,
-                "eval": eval_res,
-                "ms_per_window": (
-                    elapsed_ms / num_windows if num_windows > 0 else 0.0
-                ),
-            }
-        )
+                eval_res = evaluate_sequence(gt_rows, pred_rows)
+                elapsed_ms = (time.perf_counter() - start_time) * 1000.0
+
+                results.append(
+                    {
+                        "combo": combo,
+                        "eval": eval_res,
+                        "ms_per_window": (
+                            elapsed_ms / num_windows if num_windows > 0 else 0.0
+                        ),
+                    }
+                )
 
     return results
 
@@ -229,10 +430,10 @@ def main() -> None:
         "--top", type=int, default=20, help="Number of top configurations to print"
     )
     parser.add_argument(
-        "--max-combos",
+        "--max-windows",
         type=int,
-        default=500,
-        help="Maximum allowed combination count before aborting",
+        default=None,
+        help="Limit number of windows per sequence for fast sweep test",
     )
 
     args = parser.parse_args()
@@ -245,23 +446,9 @@ def main() -> None:
         [args.sensor] if args.sensor else ["DAVIS", "DVX", "EVK4"]
     )
     sensor_best_configs: Dict[str, Dict[str, Any]] = {}
+    max_w = float("inf") if not args.max_windows else float(args.max_windows)
 
     for sensor in sensors_to_sweep:
-        global_combos, geom_params = extract_sensor_grid(raw_grid, sensor)
-        full_combos = generate_full_combos(global_combos, geom_params)
-
-        print(
-            f"\n[INFO] Sensor '{sensor}': Expanded {len(full_combos)} parameter combination(s)."
-        )
-
-        if len(full_combos) > args.max_combos:
-            print(
-                f"[WARNING] Combination count {len(full_combos)} exceeds max limit {args.max_combos}. Aborting sweep for {sensor}.",
-                file=sys.stderr,
-            )
-            continue
-
-        # Discover matching sequence GT files
         gt_files = sorted(list(dataset_dir.rglob("*_bb_windows_40ms.txt")))
         filtered_files: List[Path] = []
 
@@ -282,26 +469,20 @@ def main() -> None:
             filtered_files.append(gt_f)
 
         if not filtered_files:
-            print(f"[INFO] No matching sequences found for sensor '{sensor}'.")
+            print(
+                f"[INFO] No matching sequences found for sensor '{sensor}'.",
+                flush=True,
+            )
             continue
 
         print(
-            f"[INFO] Sweeping {len(filtered_files)} sequence(s) for sensor '{sensor}'..."
+            f"\n[INFO] Sensor '{sensor}': Sweeping {len(filtered_files)} sequence(s)...",
+            flush=True,
         )
 
-        # Aggregate metrics per combination
         combo_metrics: Dict[int, Dict[str, Any]] = {}
-        for combo_idx, combo in enumerate(full_combos):
-            combo_metrics[combo_idx] = {
-                "combo": combo,
-                "all_ap": [],
-                "tp": 0,
-                "fp": 0,
-                "fn": 0,
-                "ms_list": [],
-            }
 
-        for gt_file in filtered_files:
+        for seq_idx, gt_file in enumerate(filtered_files, start=1):
             seq_name = gt_file.name.replace("_bb_windows_40ms.txt", "")
             npy_matches = list(gt_file.parent.glob(f"{seq_name}_labeled_events.npy"))
             if not npy_matches:
@@ -311,7 +492,6 @@ def main() -> None:
             if not npy_matches:
                 continue
 
-            # Load GT rows
             gt_rows = []
             with open(gt_file, "r", encoding="utf-8") as f:
                 rdr = csv.DictReader(f, delimiter="\t")
@@ -327,11 +507,24 @@ def main() -> None:
                         )
                     )
 
-            seq_sweep = run_sequence_sweep(
-                npy_matches[0], gt_rows, full_combos, sensor
+            print(
+                f"  -> [{seq_idx}/{len(filtered_files)}] Caching & sweeping '{seq_name}'...",
+                flush=True,
+            )
+            seq_sweep = run_sequence_sweep_cached(
+                npy_matches[0], gt_rows, raw_grid, sensor, max_windows=max_w
             )
 
             for combo_idx, res in enumerate(seq_sweep):
+                if combo_idx not in combo_metrics:
+                    combo_metrics[combo_idx] = {
+                        "combo": res["combo"],
+                        "all_ap": [],
+                        "tp": 0,
+                        "fp": 0,
+                        "fn": 0,
+                        "ms_list": [],
+                    }
                 cm = combo_metrics[combo_idx]
                 cm["tp"] += res["eval"]["tp"]
                 cm["fp"] += res["eval"]["fp"]
@@ -340,7 +533,6 @@ def main() -> None:
                     cm["all_ap"].append(res["eval"]["ap"])
                 cm["ms_list"].append(res["ms_per_window"])
 
-        # Compute summary metrics for each combination
         sweep_summary: List[Dict[str, Any]] = []
         for cm in combo_metrics.values():
             tp, fp, fn = cm["tp"], cm["fp"], cm["fn"]
@@ -367,51 +559,51 @@ def main() -> None:
             )
 
         sweep_summary.sort(key=lambda x: x["mAP"], reverse=True)
-        sensor_best_configs[sensor] = sweep_summary[0]
+        if sweep_summary:
+            sensor_best_configs[sensor] = sweep_summary[0]
 
-        # Print top rows
-        top_n = min(args.top, len(sweep_summary))
-        print(f"\nTop {top_n} Combinations for Sensor '{sensor}':")
-        table_data = []
-        for s_idx, s_res in enumerate(sweep_summary[:top_n], start=1):
-            cb = s_res["combo"]
-            table_data.append(
-                [
-                    s_idx,
-                    f"{s_res['mAP']:.4f}",
-                    f"{s_res['precision']:.4f}",
-                    f"{s_res['recall']:.4f}",
-                    f"{s_res['f1']:.4f}",
-                    f"{s_res['avg_ms_per_window']:.2f}",
-                    cb["box_mode"],
-                    cb["centroid_mode"],
-                    cb["percentile"],
-                    cb["min_events_in_box"],
-                    cb["box_scale" if cb["box_mode"] == "scale" else "box_w"],
-                ]
+            top_n = min(args.top, len(sweep_summary))
+            print(f"\nTop {top_n} Combinations for Sensor '{sensor}':", flush=True)
+            table_data = []
+            for s_idx, s_res in enumerate(sweep_summary[:top_n], start=1):
+                cb = s_res["combo"]
+                table_data.append(
+                    [
+                        s_idx,
+                        f"{s_res['mAP']:.4f}",
+                        f"{s_res['precision']:.4f}",
+                        f"{s_res['recall']:.4f}",
+                        f"{s_res['f1']:.4f}",
+                        f"{s_res['avg_ms_per_window']:.2f}",
+                        cb["box_mode"],
+                        cb["centroid_mode"],
+                        cb["percentile"],
+                        cb["min_events_in_box"],
+                        cb["box_scale" if cb["box_mode"] == "scale" else "box_w"],
+                    ]
+                )
+
+            print(
+                tabulate(
+                    table_data,
+                    headers=[
+                        "#",
+                        "mAP",
+                        "Prec",
+                        "Rec",
+                        "F1",
+                        "ms/win",
+                        "BoxMode",
+                        "Centroid",
+                        "Perc",
+                        "MinEvt",
+                        "Scale/W",
+                    ],
+                    tablefmt="github",
+                ),
+                flush=True,
             )
 
-        print(
-            tabulate(
-                table_data,
-                headers=[
-                    "#",
-                    "mAP",
-                    "Prec",
-                    "Rec",
-                    "F1",
-                    "ms/win",
-                    "BoxMode",
-                    "Centroid",
-                    "Perc",
-                    "MinEvt",
-                    "Scale/W",
-                ],
-                tablefmt="github",
-            )
-        )
-
-    # Save all results to CSV
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "w", newline="", encoding="utf-8") as f:
@@ -450,34 +642,34 @@ def main() -> None:
                 row[k] = cb.get(k, "")
             writer.writerow(row)
 
-    print(f"\n[INFO] Sweep results exported to CSV: {out_path}")
+    print(f"\n[INFO] Sweep results exported to CSV: {out_path}", flush=True)
 
-    # Print Recommendation Block
-    print("\n==================================================")
-    print("  RECOMMENDATION BLOCK (PER-SENSOR BEST CONFIG)")
-    print("==================================================")
+    print("\n==================================================", flush=True)
+    print("  RECOMMENDATION BLOCK (PER-SENSOR BEST CONFIG)", flush=True)
+    print("==================================================", flush=True)
     for s_name, s_best in sensor_best_configs.items():
         cb = s_best["combo"]
-        print(f"\n# --- {s_name} Optimal Parameters ---")
+        print(f"\n# --- {s_name} Optimal Parameters ---", flush=True)
         print(
-            f"# Performance: mAP={s_best['mAP']:.4f}, Prec={s_best['precision']:.4f}, Rec={s_best['recall']:.4f}, F1={s_best['f1']:.4f}"
+            f"# Performance: mAP={s_best['mAP']:.4f}, Prec={s_best['precision']:.4f}, Rec={s_best['recall']:.4f}, F1={s_best['f1']:.4f}",
+            flush=True,
         )
-        print(f"{s_name}:")
-        print(f"  percentile: {cb['percentile']}")
-        print(f"  min_events_in_box: {cb['min_events_in_box']}")
-        print(f"  open_kernel: {cb['open_kernel']}")
-        print(f"  dilate_kernel: {cb['dilate_kernel']}")
-        print(f"  min_hits: {cb['min_hits']}")
-        print(f"  box_mode: '{cb['box_mode']}'")
-        print(f"  centroid_mode: '{cb['centroid_mode']}'")
+        print(f"{s_name}:", flush=True)
+        print(f"  percentile: {cb['percentile']}", flush=True)
+        print(f"  min_events_in_box: {cb['min_events_in_box']}", flush=True)
+        print(f"  open_kernel: {cb['open_kernel']}", flush=True)
+        print(f"  dilate_kernel: {cb['dilate_kernel']}", flush=True)
+        print(f"  min_hits: {cb['min_hits']}", flush=True)
+        print(f"  box_mode: '{cb['box_mode']}'", flush=True)
+        print(f"  centroid_mode: '{cb['centroid_mode']}'", flush=True)
         if cb["box_mode"] == "fixed":
-            print(f"  box_w: {cb['box_w']}")
-            print(f"  box_h: {cb['box_h']}")
+            print(f"  box_w: {cb['box_w']}", flush=True)
+            print(f"  box_h: {cb['box_h']}", flush=True)
         else:
-            print(f"  box_scale: {cb['box_scale']}")
-            print(f"  box_pad: {cb['box_pad']}")
+            print(f"  box_scale: {cb['box_scale']}", flush=True)
+            print(f"  box_pad: {cb['box_pad']}", flush=True)
 
-    print("\n==================================================\n")
+    print("\n==================================================\n", flush=True)
 
 
 if __name__ == "__main__":
