@@ -1,0 +1,24 @@
+percentile: 97.5
+min_events_in_box: 6
+open_kernel: 2
+dilate_kernel: 3
+min_hits: 2
+max_dist_frac: 0.05
+
+# General defaults
+box_scale: 2.0
+box_pad: 4.0
+
+# Sensor resolution-adaptive scaling parameters
+box_scale_evk4: 3.8
+box_pad_evk4: 10.0
+box_scale_dvx: 1.5
+box_pad_dvx: 4.0
+box_scale_davis: 1.1
+box_pad_davis: 1.5
+
+confidence_weights:
+  density: 0.25
+  events: 0.35
+  compactness: 0.20
+  persistence: 0.20
