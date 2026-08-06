@@ -75,14 +75,29 @@ def load_yaml_config(path: Path) -> Dict[str, Any]:
         return cfg
 
 
+def filter_gt_files(
+    dataset_dir: Path, target_sensor: str, split: str = "all"
+) -> List[Path]:
+    """Discover and filter GT sequence files by sensor and split."""
+    gt_files = sorted(list(dataset_dir.rglob("*_bb_windows_40ms.txt")))
+    filtered: List[Path] = []
+    for gt_f in gt_files:
+        seq_name = gt_f.name.replace("_bb_windows_40ms.txt", "")
+        if target_sensor.upper() not in seq_name.upper():
+            continue
+        if split == "train" and "Training" not in str(gt_f):
+            continue
+        if split == "test" and "Testing" not in str(gt_f):
+            continue
+        filtered.append(gt_f)
+    return filtered
+
+
 def run_oracle_analysis(
-    dataset_dir: Path, target_sensor: str, cfg: Dict[str, Any]
+    dataset_dir: Path, target_sensor: str, cfg: Dict[str, Any], split: str = "all"
 ) -> Dict[str, Any]:
     """Analysis A — Oracle ceiling using label == 1 RSO events."""
-    gt_files = sorted(list(dataset_dir.rglob("*_bb_windows_40ms.txt")))
-    sensor_files = [
-        f for f in gt_files if target_sensor.upper() in f.name.upper()
-    ]
+    sensor_files = filter_gt_files(dataset_dir, target_sensor, split)
 
     sensor_cfg = (
         cfg.get(target_sensor, {})
@@ -152,7 +167,6 @@ def run_oracle_analysis(
                 xs = label1_events[:, 0].astype(float)
                 ys = label1_events[:, 1].astype(float)
 
-                # Tight bounding box
                 min_x, max_x = xs.min(), xs.max()
                 min_y, max_y = ys.min(), ys.max()
                 t_w = max(3.0, max_x - min_x + 1.0)
@@ -165,7 +179,6 @@ def run_oracle_analysis(
                 )
                 tight_ious.append(tight_score)
 
-                # Unweighted centroid + fixed size
                 u_cx = xs.mean()
                 u_cy = ys.mean()
                 unw_score = iou(
@@ -174,7 +187,6 @@ def run_oracle_analysis(
                 )
                 unweighted_ious.append(unw_score)
 
-                # Weighted centroid + fixed size (same as unweighted for individual label==1 event list)
                 w_cx = u_cx
                 w_cy = u_cy
                 w_score = iou(
@@ -203,6 +215,7 @@ def run_oracle_analysis(
 
     return {
         "sensor": target_sensor,
+        "split": split,
         "total_gt_windows": total_gt_windows,
         "zero_label_windows": zero_label_windows,
         "tight": {
@@ -228,13 +241,10 @@ def run_oracle_analysis(
 
 
 def run_stagewise_and_miss_analysis(
-    dataset_dir: Path, target_sensor: str, cfg: Dict[str, Any]
+    dataset_dir: Path, target_sensor: str, cfg: Dict[str, Any], split: str = "all"
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """Analysis B & C — Stage-wise recall and miss attribution."""
-    gt_files = sorted(list(dataset_dir.rglob("*_bb_windows_40ms.txt")))
-    sensor_files = [
-        f for f in gt_files if target_sensor.upper() in f.name.upper()
-    ]
+    sensor_files = filter_gt_files(dataset_dir, target_sensor, split)
 
     sensor_cfg = (
         cfg.get(target_sensor, {})
@@ -243,9 +253,6 @@ def run_stagewise_and_miss_analysis(
     )
 
     percentile = float(sensor_cfg.get("percentile", cfg.get("percentile", 97.5)))
-    min_events = float(
-        sensor_cfg.get("min_events_in_box", cfg.get("min_events_in_box", 6))
-    )
     open_k = int(sensor_cfg.get("open_kernel", cfg.get("open_kernel", 2)))
     dilate_k = int(sensor_cfg.get("dilate_kernel", cfg.get("dilate_kernel", 3)))
     min_hits = int(sensor_cfg.get("min_hits", cfg.get("min_hits", 2)))
@@ -303,7 +310,6 @@ def run_stagewise_and_miss_analysis(
                     )
                 )
 
-        # Stage processing per window
         w_s1_boxes: List[List[Tuple[float, float, float, float]]] = []
         w_s2_boxes: List[List[Tuple[float, float, float, float]]] = []
         w_s3_boxes: List[List[Tuple[float, float, float, float]]] = []
@@ -323,7 +329,6 @@ def run_stagewise_and_miss_analysis(
             raw_thresh = float(np.percentile(nonzero_vals, percentile))
             thresh = max(1.0, raw_thresh)
 
-            # Stage 1: raw binary
             b_s1 = (count_img >= thresh).astype(np.uint8)
             num_l1, labels1, stats1, centroids1 = cv2.connectedComponentsWithStats(
                 b_s1, connectivity=8
@@ -339,7 +344,6 @@ def run_stagewise_and_miss_analysis(
             ]
             w_s1_boxes.append(s1_b)
 
-            # Stage 2: morphology
             b_s2 = b_s1.copy()
             if open_k > 1:
                 kernel_open = cv2.getStructuringElement(
@@ -366,7 +370,6 @@ def run_stagewise_and_miss_analysis(
             ]
             w_s2_boxes.append(s2_b)
 
-            # Stage 3: detect_boxes (area & min_events)
             s3_dets = detect_boxes(count_img, width, height, cfg)
             s3_b = [
                 (
@@ -379,7 +382,6 @@ def run_stagewise_and_miss_analysis(
             ]
             w_s3_boxes.append(s3_b)
 
-        # Stage 4: min_hits persistence
         for w_idx in range(num_windows):
             s3_b = w_s3_boxes[w_idx]
             prev_b = w_s3_boxes[w_idx - 1] if w_idx > 0 else []
@@ -402,7 +404,6 @@ def run_stagewise_and_miss_analysis(
                     s4_b.append(box)
             w_s4_boxes.append(s4_b)
 
-        # Stage evaluation & miss attribution per GT box
         for w_idx in range(num_windows):
             w_start, _, count_img, w_ev = window_data[w_idx]
             if w_start not in gt_by_window:
@@ -426,12 +427,10 @@ def run_stagewise_and_miss_analysis(
                 if m4:
                     s4_matched += 1
 
-                # Miss Attribution Priority Bucketing
                 if not m4:
                     if len(w_ev) == 0:
                         miss_buckets["NO_EVENTS"] += 1
                     elif not m1:
-                        # Check GT region max count
                         x1 = max(0, int(gt_cx - gt_w / 2.0))
                         y1 = max(0, int(gt_cy - gt_h / 2.0))
                         x2 = min(width, int(gt_cx + gt_w / 2.0))
@@ -448,7 +447,6 @@ def run_stagewise_and_miss_analysis(
                     elif not m4:
                         miss_buckets["LOST_TO_PERSISTENCE"] += 1
                     else:
-                        # Check IoU low
                         best_iou = 0.0
                         best_off = 0.0
                         for b in w_s4_boxes[w_idx]:
@@ -466,6 +464,7 @@ def run_stagewise_and_miss_analysis(
 
     stage_res = {
         "sensor": target_sensor,
+        "split": split,
         "total_gt": total_gt,
         "recalls": {
             "S1": s1_matched / total_gt if total_gt > 0 else 0.0,
@@ -499,13 +498,10 @@ def run_stagewise_and_miss_analysis(
 
 
 def run_signal_strength_analysis(
-    dataset_dir: Path, target_sensor: str
+    dataset_dir: Path, target_sensor: str, split: str = "all"
 ) -> Dict[str, Any]:
     """Analysis D — Signal strength & background contrast."""
-    gt_files = sorted(list(dataset_dir.rglob("*_bb_windows_40ms.txt")))
-    sensor_files = [
-        f for f in gt_files if target_sensor.upper() in f.name.upper()
-    ]
+    sensor_files = filter_gt_files(dataset_dir, target_sensor, split)
 
     signal_pos: List[float] = []
     signal_neg: List[float] = []
@@ -557,7 +553,6 @@ def run_signal_strength_analysis(
                 signal_neg.append(float(sub_neg))
                 gt_region_maxes.append(float(sub_cnt.max()) if sub_cnt.size else 0.0)
 
-                # Sample equal-area background region shifted horizontally
                 bg_x1 = (x1 + int(2.0 * gt_w)) % width
                 bg_x2 = min(width, bg_x1 + (x2 - x1))
                 bg_sub = count_img[y1:y2, bg_x1:bg_x2].sum()
@@ -577,6 +572,7 @@ def run_signal_strength_analysis(
 
     return {
         "sensor": target_sensor,
+        "split": split,
         "pos_events": {
             "mean": float(pos_arr.mean()) if len(pos_arr) else 0.0,
             "median": float(np.median(pos_arr)) if len(pos_arr) else 0.0,
@@ -599,14 +595,11 @@ def run_signal_strength_analysis(
 
 
 def run_threshold_sensitivity(
-    dataset_dir: Path, target_sensor: str, cfg: Dict[str, Any]
+    dataset_dir: Path, target_sensor: str, cfg: Dict[str, Any], split: str = "all"
 ) -> List[Dict[str, Any]]:
     """Analysis E — Threshold sensitivity sweep over percentiles."""
     percentiles = [90.0, 95.0, 97.0, 97.5, 98.0, 99.0, 99.5, 99.8]
-    gt_files = sorted(list(dataset_dir.rglob("*_bb_windows_40ms.txt")))
-    sensor_files = [
-        f for f in gt_files if target_sensor.upper() in f.name.upper()
-    ]
+    sensor_files = filter_gt_files(dataset_dir, target_sensor, split)
 
     sweep_results: List[Dict[str, Any]] = []
 
@@ -661,7 +654,6 @@ def run_threshold_sensitivity(
                 total_cand_count += len(boxes)
                 window_boxes.append((w_start, w_end, boxes))
 
-                # Check S2 candidate recall
                 for gt in gt_rows:
                     if gt[0] == w_start:
                         if any(
@@ -670,7 +662,6 @@ def run_threshold_sensitivity(
                         ):
                             s2_hits += 1
 
-            # Persistence filter
             pred_rows: List[Tuple[int, int, int, int, int, int, float]] = []
             num_windows = len(window_boxes)
             diagonal = math.hypot(width, height)
@@ -737,13 +728,10 @@ def run_threshold_sensitivity(
 
 
 def run_targeted_geometry_checks(
-    dataset_dir: Path, target_sensor: str, base_cfg: Dict[str, Any]
+    dataset_dir: Path, target_sensor: str, base_cfg: Dict[str, Any], split: str = "all"
 ) -> List[Dict[str, Any]]:
     """Part 3 — Targeted geometry checks per sensor."""
-    gt_files = sorted(list(dataset_dir.rglob("*_bb_windows_40ms.txt")))
-    sensor_files = [
-        f for f in gt_files if target_sensor.upper() in f.name.upper()
-    ]
+    sensor_files = filter_gt_files(dataset_dir, target_sensor, split)
 
     if target_sensor == "EVK4":
         candidates = [
@@ -880,6 +868,13 @@ def main() -> None:
         help="Target sensor family",
     )
     parser.add_argument(
+        "--split",
+        type=str,
+        default="all",
+        choices=["train", "test", "all"],
+        help="Subset split to analyze (train, test, or all)",
+    )
+    parser.add_argument(
         "--dataset-dir",
         type=str,
         default="../OrbitSight_Dataset",
@@ -906,10 +901,11 @@ def main() -> None:
     cfg = load_yaml_config(cfg_path)
     dataset_dir = Path(args.dataset_dir).resolve()
     sensor = args.sensor
+    split = args.split
 
-    if args.check-geometry:
-        print(f"\n[INFO] Running Targeted Geometry Checks for Sensor '{sensor}'...")
-        geom_res = run_targeted_geometry_checks(dataset_dir, sensor, cfg)
+    if args.check_geometry:
+        print(f"\n[INFO] Running Targeted Geometry Checks for Sensor '{sensor}' (Split: {split})...")
+        geom_res = run_targeted_geometry_checks(dataset_dir, sensor, cfg, split)
         geom_res.sort(key=lambda x: x["mAP"], reverse=True)
 
         rows = [
@@ -930,14 +926,13 @@ def main() -> None:
         )
         return
 
-    print(f"\n[INFO] Running Recall Diagnostics for Sensor '{sensor}'...")
+    print(f"\n[INFO] Running Recall Diagnostics for Sensor '{sensor}' (Split: {split})...")
 
-    oracle_res = run_oracle_analysis(dataset_dir, sensor, cfg)
-    stage_res, miss_res = run_stagewise_and_miss_analysis(dataset_dir, sensor, cfg)
-    signal_res = run_signal_strength_analysis(dataset_dir, sensor)
-    sens_res = run_threshold_sensitivity(dataset_dir, sensor, cfg)
+    oracle_res = run_oracle_analysis(dataset_dir, sensor, cfg, split)
+    stage_res, miss_res = run_stagewise_and_miss_analysis(dataset_dir, sensor, cfg, split)
+    signal_res = run_signal_strength_analysis(dataset_dir, sensor, split)
+    sens_res = run_threshold_sensitivity(dataset_dir, sensor, cfg, split)
 
-    # Print Oracle Ceiling Table
     print("\n--- ANALYSIS A: ORACLE CEILING ---")
     oracle_table = [
         [
@@ -969,7 +964,6 @@ def main() -> None:
     print(f"Zero label==1 Event Windows: {oracle_res['zero_label_windows']} / {oracle_res['total_gt_windows']}")
     print(f"Weighted Centroid Error (px vs GT): Mean={oracle_res['weighted']['c_err_mean']:.2f}, Median={oracle_res['weighted']['c_err_median']:.2f}, P90={oracle_res['weighted']['c_err_p90']:.2f}, Fraction within GT_width/3: {oracle_res['weighted']['within_gt_third']:.4f}")
 
-    # Print Stage-wise Recall Table
     print("\n--- ANALYSIS B: STAGE-WISE RECALL ---")
     stage_table = [
         ["S1 (After Thresholding)", f"{stage_res['recalls']['S1']:.4f}", "-"],
@@ -985,7 +979,6 @@ def main() -> None:
         )
     )
 
-    # Print Miss Attribution Table
     print("\n--- ANALYSIS C: MISS ATTRIBUTION BUCKETS ---")
     miss_table = [
         [k, v, f"{(v / stage_res['total_gt'] * 100.0) if stage_res['total_gt'] > 0 else 0.0:.2f}%"]
@@ -1002,7 +995,6 @@ def main() -> None:
         print(f"IOU_TOO_LOW IoU Stats: Mean={miss_res['iou_too_low_stats']['mean']:.4f}, Median={miss_res['iou_too_low_stats']['median']:.4f}, P10={miss_res['iou_too_low_stats']['p10']:.4f}, P90={miss_res['iou_too_low_stats']['p90']:.4f}")
         print(f"IOU_TOO_LOW Offset Stats: Mean={miss_res['offset_stats']['mean']:.2f}px, Median={miss_res['offset_stats']['median']:.2f}px, P90={miss_res['offset_stats']['p90']:.2f}px")
 
-    # Print Signal Strength Table
     print("\n--- ANALYSIS D: SIGNAL STRENGTH & CONTRAST ---")
     signal_table = [
         ["Positive Polarity Events", f"{signal_res['pos_events']['mean']:.2f}", f"{signal_res['pos_events']['median']:.2f}", f"{signal_res['pos_events']['p10']:.2f}", f"{signal_res['pos_events']['p25']:.2f}", f"{signal_res['pos_events']['p75']:.2f}", f"{signal_res['pos_events']['p90']:.2f}"],
@@ -1018,7 +1010,6 @@ def main() -> None:
     print(f"Signal-to-Background Contrast Ratio: {signal_res['contrast_ratio']:.2f}")
     print(f"Percentile threshold to retain 90% of GT regions: {signal_res['p90_retain_threshold']:.2f}")
 
-    # Print Threshold Sensitivity Table
     print("\n--- ANALYSIS E: THRESHOLD SENSITIVITY ---")
     sens_table = [
         [
@@ -1039,23 +1030,22 @@ def main() -> None:
         )
     )
 
-    # Print FINDINGS Block
     print("\n==================================================")
     print("  FINDINGS BLOCK (MEASURED VALUES ONLY)")
     print("==================================================")
-    print(f"Sensor: {sensor}")
+    print(f"Sensor: {sensor} (Split: {split})")
     print(f"Oracle IoU Ceiling (Weighted Centroid): {oracle_res['weighted']['reach_iou50']:.4f}")
     print(f"Largest Recall Drop Stage: {max(stage_res['drops'].items(), key=lambda x: x[1])[0]}")
     print(f"Measured Centroid Error: Mean={oracle_res['weighted']['c_err_mean']:.2f}px, Median={oracle_res['weighted']['c_err_median']:.2f}px, P90={oracle_res['weighted']['c_err_p90']:.2f}px")
 
-    # Save to CSV
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        writer.writerow(["sensor", "oracle_w_ceiling", "s1_recall", "s2_recall", "s3_recall", "s4_recall", "c_err_mean", "c_err_median", "c_err_p90"])
+        writer.writerow(["sensor", "split", "oracle_w_ceiling", "s1_recall", "s2_recall", "s3_recall", "s4_recall", "c_err_mean", "c_err_median", "c_err_p90"])
         writer.writerow([
             sensor,
+            split,
             f"{oracle_res['weighted']['reach_iou50']:.4f}",
             f"{stage_res['recalls']['S1']:.4f}",
             f"{stage_res['recalls']['S2']:.4f}",
