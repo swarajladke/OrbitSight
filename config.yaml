@@ -25,18 +25,18 @@ DVX:
   open_kernel: 2
   dilate_kernel: 3
   min_hits: 2
-  box_mode: "scale"
-  centroid_mode: "component"
-  box_scale: 1.5
-  box_pad: 4.0
+  box_mode: "fixed"
+  centroid_mode: "weighted"
+  box_w: 18
+  box_h: 18
 
 DAVIS:
   percentile: 97.5
-  min_events_in_box: 6
-  open_kernel: 2
+  min_events_in_box: 4
+  open_kernel: 1
   dilate_kernel: 3
   min_hits: 2
-  box_mode: "scale"
-  centroid_mode: "component"
-  box_scale: 1.1
-  box_pad: 1.5
+  box_mode: "fixed"
+  centroid_mode: "weighted"
+  box_w: 10
+  box_h: 12
