@@ -710,7 +710,7 @@ def run_threshold_sensitivity(
 def run_box_mode_comparison(
     dataset_dir: Path, cfg: Dict[str, Any]
 ) -> List[Dict[str, Any]]:
-    """3c — Compare scale, fixed, and extent box modes per sensor and split."""
+    """3c — Compare scale, fixed, and extent box modes per sensor and split in a single fast pass."""
     results: List[Dict[str, Any]] = []
 
     for sensor in ["DAVIS", "DVX", "EVK4"]:
@@ -719,41 +719,45 @@ def run_box_mode_comparison(
             if not sensor_files:
                 continue
 
-            for b_mode in ["scale", "fixed", "extent"]:
-                test_cfg = deepcopy(cfg)
-                if sensor not in test_cfg:
-                    test_cfg[sensor] = {}
-                test_cfg[sensor]["box_mode"] = b_mode
+            mode_stats = {
+                m: {"tp": 0, "fp": 0, "fn": 0, "aps": [], "total_ms": 0.0, "total_windows": 0}
+                for m in ["scale", "fixed", "extent"]
+            }
 
-                tot_tp, tot_fp, tot_fn = 0, 0, 0
-                all_aps: List[float] = []
-                total_ms, total_windows = 0.0, 0
+            for gt_f in sensor_files:
+                seq_name = gt_f.name.replace("_bb_windows_40ms.txt", "")
+                npy_matches = list(gt_f.parent.glob(f"{seq_name}_labeled_events.npy"))
+                if not npy_matches:
+                    npy_matches = list(dataset_dir.rglob(f"{seq_name}_labeled_events.npy"))
+                if not npy_matches:
+                    continue
 
-                for gt_f in sensor_files:
-                    seq_name = gt_f.name.replace("_bb_windows_40ms.txt", "")
-                    npy_matches = list(gt_f.parent.glob(f"{seq_name}_labeled_events.npy"))
-                    if not npy_matches:
-                        npy_matches = list(dataset_dir.rglob(f"{seq_name}_labeled_events.npy"))
-                    if not npy_matches:
-                        continue
+                events = load_events(npy_matches[0])
+                width, height = infer_resolution(seq_name, events[:, 0], events[:, 1])
 
-                    events = load_events(npy_matches[0])
-                    width, height = infer_resolution(seq_name, events[:, 0], events[:, 1])
-
-                    gt_rows = []
-                    with open(gt_f, "r", encoding="utf-8") as f:
-                        rdr = csv.DictReader(f, delimiter="\t")
-                        for r in rdr:
-                            gt_rows.append(
-                                (
-                                    int(r["window_start_timestamp_us"]),
-                                    int(r["window_end_timestamp_us"]),
-                                    int(r["center_x"]),
-                                    int(r["center_y"]),
-                                    int(r["width"]),
-                                    int(r["height"]),
-                                )
+                gt_rows = []
+                with open(gt_f, "r", encoding="utf-8") as f:
+                    rdr = csv.DictReader(f, delimiter="\t")
+                    for r in rdr:
+                        gt_rows.append(
+                            (
+                                int(r["window_start_timestamp_us"]),
+                                int(r["window_end_timestamp_us"]),
+                                int(r["center_x"]),
+                                int(r["center_y"]),
+                                int(r["width"]),
+                                int(r["height"]),
                             )
+                        )
+
+                diagonal = math.hypot(width, height)
+                max_dist = 0.05 * diagonal
+
+                for b_mode in ["scale", "fixed", "extent"]:
+                    test_cfg = deepcopy(cfg)
+                    if sensor not in test_cfg:
+                        test_cfg[sensor] = {}
+                    test_cfg[sensor]["box_mode"] = b_mode
 
                     start_t = time.perf_counter()
                     window_boxes: List[Tuple[int, int, List[Dict[str, float]]]] = []
@@ -764,21 +768,16 @@ def run_box_mode_comparison(
 
                     num_w = len(window_boxes)
                     elapsed_ms = (time.perf_counter() - start_t) * 1000.0
-                    total_ms += elapsed_ms
-                    total_windows += num_w
+                    mode_stats[b_mode]["total_ms"] += elapsed_ms
+                    mode_stats[b_mode]["total_windows"] += num_w
 
-                    diagonal = math.hypot(width, height)
-                    max_dist = 0.05 * diagonal
                     pred_rows: List[Tuple[int, int, int, int, int, int, float]] = []
-
                     for w_idx in range(num_w):
                         w_start, w_end, boxes = window_boxes[w_idx]
                         if not boxes:
                             continue
                         prev_b = window_boxes[w_idx - 1][2] if w_idx > 0 else []
-                        next_b = (
-                            window_boxes[w_idx + 1][2] if w_idx < num_w - 1 else []
-                        )
+                        next_b = window_boxes[w_idx + 1][2] if w_idx < num_w - 1 else []
 
                         for box in boxes:
                             hits = 1
@@ -808,15 +807,17 @@ def run_box_mode_comparison(
                                 )
 
                     eval_res = evaluate_sequence(gt_rows, pred_rows)
-                    tot_tp += eval_res["tp"]
-                    tot_fp += eval_res["fp"]
-                    tot_fn += eval_res["fn"]
+                    mode_stats[b_mode]["tp"] += eval_res["tp"]
+                    mode_stats[b_mode]["fp"] += eval_res["fp"]
+                    mode_stats[b_mode]["fn"] += eval_res["fn"]
                     if not np.isnan(eval_res["ap"]):
-                        all_aps.append(eval_res["ap"])
+                        mode_stats[b_mode]["aps"].append(eval_res["ap"])
 
-                prec, rec, f1 = compute_prf1(tot_tp, tot_fp, tot_fn)
-                mAP = float(np.mean(all_aps)) if all_aps else 0.0
-                ms_win = total_ms / total_windows if total_windows > 0 else 0.0
+            for b_mode in ["scale", "fixed", "extent"]:
+                st = mode_stats[b_mode]
+                prec, rec, f1 = compute_prf1(st["tp"], st["fp"], st["fn"])
+                mAP = float(np.mean(st["aps"])) if st["aps"] else 0.0
+                ms_win = st["total_ms"] / st["total_windows"] if st["total_windows"] > 0 else 0.0
 
                 results.append(
                     {
