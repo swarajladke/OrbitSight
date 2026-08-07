@@ -4,8 +4,9 @@ min_events_in_box: 6
 open_kernel: 2
 dilate_kernel: 3
 min_hits: 2
-box_mode: "scale"
-centroid_mode: "component"
+box_mode: "extent"
+centroid_mode: "weighted"
+max_area_frac: 0.02
 
 # Per-sensor optimal parameter overrides
 EVK4:
@@ -18,6 +19,11 @@ EVK4:
   centroid_mode: "component"
   box_w: 52
   box_h: 56
+  max_area_frac: 0.03
+  min_dim: 20
+  max_dim: 80
+  extent_scale: 1.0
+  extent_pad: 4.0
 
 DVX:
   percentile: 97.5
@@ -25,10 +31,15 @@ DVX:
   open_kernel: 2
   dilate_kernel: 3
   min_hits: 2
-  box_mode: "fixed"
+  box_mode: "extent"
   centroid_mode: "weighted"
   box_w: 18
   box_h: 18
+  max_area_frac: 0.05
+  min_dim: 12
+  max_dim: 60
+  extent_scale: 1.2
+  extent_pad: 4.0
 
 DAVIS:
   percentile: 97.5
@@ -36,7 +47,12 @@ DAVIS:
   open_kernel: 1
   dilate_kernel: 3
   min_hits: 2
-  box_mode: "fixed"
+  box_mode: "extent"
   centroid_mode: "weighted"
   box_w: 10
   box_h: 12
+  max_area_frac: 0.02
+  min_dim: 4
+  max_dim: 30
+  extent_scale: 1.1
+  extent_pad: 2.0

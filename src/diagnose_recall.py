@@ -1,4 +1,4 @@
-"""Recall attribution, oracle analysis, and targeted geometry checks for OrbitSight."""
+"""Recall attribution, oracle analysis, GT variance, box-mode comparisons, and targeted geometry checks."""
 
 import argparse
 import csv
@@ -94,10 +94,67 @@ def filter_gt_files(
     return filtered
 
 
+def run_gt_variance_analysis(
+    dataset_dir: Path, target_sensor: str
+) -> Dict[str, Any]:
+    """3a — Quantify GT box size variance and multi-box window distribution."""
+    sensor_files = filter_gt_files(dataset_dir, target_sensor, "all")
+    widths: List[float] = []
+    heights: List[float] = []
+    boxes_per_window: List[int] = []
+
+    for gt_f in sensor_files:
+        gt_by_window: Dict[int, List[Tuple[float, float]]] = {}
+        with open(gt_f, "r", encoding="utf-8") as f:
+            rdr = csv.DictReader(f, delimiter="\t")
+            for r in rdr:
+                ws = int(r["window_start_timestamp_us"])
+                w_val = float(r["width"])
+                h_val = float(r["height"])
+                widths.append(w_val)
+                heights.append(h_val)
+                gt_by_window.setdefault(ws, []).append((w_val, h_val))
+
+        for w_boxes in gt_by_window.values():
+            boxes_per_window.append(len(w_boxes))
+
+    w_arr = np.array(widths)
+    h_arr = np.array(heights)
+    b_arr = np.array(boxes_per_window)
+
+    w_mean = float(w_arr.mean()) if len(w_arr) else 0.0
+    w_std = float(w_arr.std()) if len(w_arr) else 0.0
+    h_mean = float(h_arr.mean()) if len(h_arr) else 0.0
+    h_std = float(h_arr.std()) if len(h_arr) else 0.0
+
+    return {
+        "sensor": target_sensor,
+        "total_gt_boxes": len(widths),
+        "width_cov": (w_std / w_mean) if w_mean > 0 else 0.0,
+        "height_cov": (h_std / h_mean) if h_mean > 0 else 0.0,
+        "width_percentiles": {
+            "p10": float(np.percentile(w_arr, 10)) if len(w_arr) else 0.0,
+            "p25": float(np.percentile(w_arr, 25)) if len(w_arr) else 0.0,
+            "p50": float(np.percentile(w_arr, 50)) if len(w_arr) else 0.0,
+            "p75": float(np.percentile(w_arr, 75)) if len(w_arr) else 0.0,
+            "p90": float(np.percentile(w_arr, 90)) if len(w_arr) else 0.0,
+        },
+        "height_percentiles": {
+            "p10": float(np.percentile(h_arr, 10)) if len(h_arr) else 0.0,
+            "p25": float(np.percentile(h_arr, 25)) if len(h_arr) else 0.0,
+            "p50": float(np.percentile(h_arr, 50)) if len(h_arr) else 0.0,
+            "p75": float(np.percentile(h_arr, 75)) if len(h_arr) else 0.0,
+            "p90": float(np.percentile(h_arr, 90)) if len(h_arr) else 0.0,
+        },
+        "max_boxes_per_window": int(b_arr.max()) if len(b_arr) else 0,
+        "frac_multi_box_windows": float((b_arr > 1).mean()) if len(b_arr) else 0.0,
+    }
+
+
 def run_oracle_analysis(
     dataset_dir: Path, target_sensor: str, cfg: Dict[str, Any], split: str = "all"
 ) -> Dict[str, Any]:
-    """Analysis A — Oracle ceiling using label == 1 RSO events."""
+    """Analysis A — Naive vs Clustered Oracle ceiling using label == 1 RSO events."""
     sensor_files = filter_gt_files(dataset_dir, target_sensor, split)
 
     sensor_cfg = (
@@ -116,7 +173,8 @@ def run_oracle_analysis(
     fixed_w = float(sensor_cfg.get("box_w", cfg.get("box_w", def_w)))
     fixed_h = float(sensor_cfg.get("box_h", cfg.get("box_h", def_h)))
 
-    tight_ious: List[float] = []
+    naive_ious: List[float] = []
+    clustered_ious: List[float] = []
     unweighted_ious: List[float] = []
     weighted_ious: List[float] = []
     centroid_errors: List[float] = []
@@ -160,7 +218,8 @@ def run_oracle_analysis(
                 total_gt_windows += 1
                 if len(label1_events) == 0:
                     zero_label_windows += 1
-                    tight_ious.append(0.0)
+                    naive_ious.append(0.0)
+                    clustered_ious.append(0.0)
                     unweighted_ious.append(0.0)
                     weighted_ious.append(0.0)
                     continue
@@ -168,6 +227,7 @@ def run_oracle_analysis(
                 xs = label1_events[:, 0].astype(float)
                 ys = label1_events[:, 1].astype(float)
 
+                # Naive Oracle: Single tight box of all label==1 events
                 min_x, max_x = xs.min(), xs.max()
                 min_y, max_y = ys.min(), ys.max()
                 t_w = max(3.0, max_x - min_x + 1.0)
@@ -175,11 +235,37 @@ def run_oracle_analysis(
                 t_cx = (min_x + max_x) / 2.0
                 t_cy = (min_y + max_y) / 2.0
 
-                tight_score = iou(
+                naive_score = iou(
                     (t_cx, t_cy, t_w, t_h), (gt_cx, gt_cy, gt_w, gt_h)
                 )
-                tight_ious.append(tight_score)
+                naive_ious.append(naive_score)
 
+                # Clustered Oracle: Spatial connected components on label==1 events
+                l1_img = np.zeros((height, width), dtype=np.uint8)
+                ixs = np.clip(xs.astype(int), 0, width - 1)
+                iys = np.clip(ys.astype(int), 0, height - 1)
+                l1_img[iys, ixs] = 1
+
+                n_cl, l_cl, s_cl, c_cl = cv2.connectedComponentsWithStats(l1_img, connectivity=8)
+
+                best_cl_score = 0.0
+                best_w_cx, best_w_cy = t_cx, t_cy
+
+                for ci in range(1, n_cl):
+                    cx_c = float(c_cl[ci, 0])
+                    cy_c = float(c_cl[ci, 1])
+                    cw_c = float(s_cl[ci, cv2.CC_STAT_WIDTH])
+                    ch_c = float(s_cl[ci, cv2.CC_STAT_HEIGHT])
+
+                    score = iou((cx_c, cy_c, cw_c, ch_c), (gt_cx, gt_cy, gt_w, gt_h))
+                    if score > best_cl_score:
+                        best_cl_score = score
+                        best_w_cx = cx_c
+                        best_w_cy = cy_c
+
+                clustered_ious.append(best_cl_score)
+
+                # Unweighted & Weighted Centroids
                 u_cx = xs.mean()
                 u_cy = ys.mean()
                 unw_score = iou(
@@ -188,55 +274,51 @@ def run_oracle_analysis(
                 )
                 unweighted_ious.append(unw_score)
 
-                w_cx = u_cx
-                w_cy = u_cy
                 w_score = iou(
-                    (w_cx, w_cy, fixed_w, fixed_h),
+                    (best_w_cx, best_w_cy, fixed_w, fixed_h),
                     (gt_cx, gt_cy, gt_w, gt_h),
                 )
                 weighted_ious.append(w_score)
 
-                c_err = math.hypot(w_cx - gt_cx, w_cy - gt_cy)
+                c_err = math.hypot(best_w_cx - gt_cx, best_w_cy - gt_cy)
                 centroid_errors.append(c_err)
                 gt_w_thirds.append(gt_w / 3.0)
 
-    tight_arr = np.array(tight_ious)
+    naive_arr = np.array(naive_ious)
+    cl_arr = np.array(clustered_ious)
     unw_arr = np.array(unweighted_ious)
     w_arr = np.array(weighted_ious)
     err_arr = np.array(centroid_errors)
     third_arr = np.array(gt_w_thirds)
-
-    frac_tight = float((tight_arr >= 0.5).mean()) if len(tight_arr) else 0.0
-    frac_unw = float((unw_arr >= 0.5).mean()) if len(unw_arr) else 0.0
-    frac_w = float((w_arr >= 0.5).mean()) if len(w_arr) else 0.0
-
-    within_third = (
-        float((err_arr <= third_arr).mean()) if len(err_arr) else 0.0
-    )
 
     return {
         "sensor": target_sensor,
         "split": split,
         "total_gt_windows": total_gt_windows,
         "zero_label_windows": zero_label_windows,
-        "tight": {
-            "reach_iou50": frac_tight,
-            "mean_iou": float(tight_arr.mean()) if len(tight_arr) else 0.0,
-            "median_iou": float(np.median(tight_arr)) if len(tight_arr) else 0.0,
+        "naive_tight": {
+            "reach_iou50": float((naive_arr >= 0.5).mean()) if len(naive_arr) else 0.0,
+            "mean_iou": float(naive_arr.mean()) if len(naive_arr) else 0.0,
+            "median_iou": float(np.median(naive_arr)) if len(naive_arr) else 0.0,
+        },
+        "clustered_tight": {
+            "reach_iou50": float((cl_arr >= 0.5).mean()) if len(cl_arr) else 0.0,
+            "mean_iou": float(cl_arr.mean()) if len(cl_arr) else 0.0,
+            "median_iou": float(np.median(cl_arr)) if len(cl_arr) else 0.0,
         },
         "unweighted": {
-            "reach_iou50": frac_unw,
+            "reach_iou50": float((unw_arr >= 0.5).mean()) if len(unw_arr) else 0.0,
             "mean_iou": float(unw_arr.mean()) if len(unw_arr) else 0.0,
             "median_iou": float(np.median(unw_arr)) if len(unw_arr) else 0.0,
         },
         "weighted": {
-            "reach_iou50": frac_w,
+            "reach_iou50": float((w_arr >= 0.5).mean()) if len(w_arr) else 0.0,
             "mean_iou": float(w_arr.mean()) if len(w_arr) else 0.0,
             "median_iou": float(np.median(w_arr)) if len(w_arr) else 0.0,
             "c_err_mean": float(err_arr.mean()) if len(err_arr) else 0.0,
             "c_err_median": float(np.median(err_arr)) if len(err_arr) else 0.0,
             "c_err_p90": float(np.percentile(err_arr, 90)) if len(err_arr) else 0.0,
-            "within_gt_third": within_third,
+            "within_gt_third": float((err_arr <= third_arr).mean()) if len(err_arr) else 0.0,
         },
     }
 
@@ -304,16 +386,13 @@ def run_stagewise_and_miss_analysis(
                     )
                 )
 
-        window_list: List[Tuple[int, int, List[Tuple[float, float, float, float]], List[Tuple[float, float, float, float]], List[Tuple[float, float, float, float]], List[Tuple[float, float, float, float]]]] = []
-
         w_idx = 0
         w_s3_boxes_list: List[List[Tuple[float, float, float, float]]] = []
         w_s1_boxes_list: List[List[Tuple[float, float, float, float]]] = []
         w_s2_boxes_list: List[List[Tuple[float, float, float, float]]] = []
-        w_meta: List[Tuple[int, int, np.ndarray, int]] = []
+        w_meta: List[Tuple[int, int, int]] = []
 
         for w_start, w_end, w_events in iter_windows(events, window_us=WINDOW_US):
-            # Transient window analysis
             count_img, _, _ = event_image(w_events, width, height)
             nonzero_vals = count_img[count_img > 0]
 
@@ -321,7 +400,7 @@ def run_stagewise_and_miss_analysis(
                 w_s1_boxes_list.append([])
                 w_s2_boxes_list.append([])
                 w_s3_boxes_list.append([])
-                w_meta.append((w_start, w_end, np.zeros((0, 6)), 0))
+                w_meta.append((w_start, w_end, len(w_events)))
                 del count_img
                 w_idx += 1
                 continue
@@ -381,15 +460,14 @@ def run_stagewise_and_miss_analysis(
                 for b in s3_dets
             ]
             w_s3_boxes_list.append(s3_b)
-            w_meta.append((w_start, w_end, w_events, len(w_events)))
+            w_meta.append((w_start, w_end, len(w_events)))
             del count_img
             w_idx += 1
 
         num_windows = len(w_meta)
 
-        # Stage 4 & GT evaluation
         for idx in range(num_windows):
-            w_start, w_end, w_ev, ev_cnt = w_meta[idx]
+            w_start, w_end, ev_cnt = w_meta[idx]
             if w_start not in gt_by_window:
                 continue
 
@@ -496,108 +574,11 @@ def run_stagewise_and_miss_analysis(
     return stage_res, miss_res
 
 
-def run_signal_strength_analysis(
-    dataset_dir: Path, target_sensor: str, split: str = "all"
-) -> Dict[str, Any]:
-    """Analysis D — Signal strength & background contrast."""
-    sensor_files = filter_gt_files(dataset_dir, target_sensor, split)
-
-    signal_pos: List[float] = []
-    signal_neg: List[float] = []
-    bg_counts: List[float] = []
-    gt_region_maxes: List[float] = []
-
-    for gt_f in sensor_files:
-        seq_name = gt_f.name.replace("_bb_windows_40ms.txt", "")
-        npy_matches = list(gt_f.parent.glob(f"{seq_name}_labeled_events.npy"))
-        if not npy_matches:
-            npy_matches = list(dataset_dir.rglob(f"{seq_name}_labeled_events.npy"))
-        if not npy_matches:
-            continue
-
-        events = load_events(npy_matches[0])
-        width, height = infer_resolution(seq_name, events[:, 0], events[:, 1])
-
-        gt_by_window: Dict[int, List[Tuple[float, float, float, float]]] = {}
-        with open(gt_f, "r", encoding="utf-8") as f:
-            rdr = csv.DictReader(f, delimiter="\t")
-            for r in rdr:
-                ws = int(r["window_start_timestamp_us"])
-                gt_by_window.setdefault(ws, []).append(
-                    (
-                        float(r["center_x"]),
-                        float(r["center_y"]),
-                        float(r["width"]),
-                        float(r["height"]),
-                    )
-                )
-
-        for w_start, _, w_events in iter_windows(events, window_us=WINDOW_US):
-            if w_start not in gt_by_window:
-                continue
-
-            count_img, pos_img, neg_img = event_image(w_events, width, height)
-
-            for gt_cx, gt_cy, gt_w, gt_h in gt_by_window[w_start]:
-                x1 = max(0, int(gt_cx - gt_w / 2.0))
-                y1 = max(0, int(gt_cy - gt_h / 2.0))
-                x2 = min(width, int(gt_cx + gt_w / 2.0))
-                y2 = min(height, int(gt_cy + gt_h / 2.0))
-
-                sub_pos = pos_img[y1:y2, x1:x2].sum()
-                sub_neg = neg_img[y1:y2, x1:x2].sum()
-                sub_cnt = count_img[y1:y2, x1:x2]
-
-                signal_pos.append(float(sub_pos))
-                signal_neg.append(float(sub_neg))
-                gt_region_maxes.append(float(sub_cnt.max()) if sub_cnt.size else 0.0)
-
-                bg_x1 = (x1 + int(2.0 * gt_w)) % width
-                bg_x2 = min(width, bg_x1 + (x2 - x1))
-                bg_sub = count_img[y1:y2, bg_x1:bg_x2].sum()
-                bg_counts.append(float(bg_sub))
-
-    pos_arr = np.array(signal_pos)
-    neg_arr = np.array(signal_neg)
-    bg_arr = np.array(bg_counts)
-    max_arr = np.array(gt_region_maxes)
-
-    contrast = (
-        float((pos_arr + neg_arr).mean() / max(1.0, bg_arr.mean()))
-        if len(bg_arr)
-        else 0.0
-    )
-    p90_retain_thresh = float(np.percentile(max_arr, 10)) if len(max_arr) else 0.0
-
-    return {
-        "sensor": target_sensor,
-        "split": split,
-        "pos_events": {
-            "mean": float(pos_arr.mean()) if len(pos_arr) else 0.0,
-            "median": float(np.median(pos_arr)) if len(pos_arr) else 0.0,
-            "p10": float(np.percentile(pos_arr, 10)) if len(pos_arr) else 0.0,
-            "p25": float(np.percentile(pos_arr, 25)) if len(pos_arr) else 0.0,
-            "p75": float(np.percentile(pos_arr, 75)) if len(pos_arr) else 0.0,
-            "p90": float(np.percentile(pos_arr, 90)) if len(pos_arr) else 0.0,
-        },
-        "neg_events": {
-            "mean": float(neg_arr.mean()) if len(neg_arr) else 0.0,
-            "median": float(np.median(neg_arr)) if len(neg_arr) else 0.0,
-            "p10": float(np.percentile(neg_arr, 10)) if len(neg_arr) else 0.0,
-            "p25": float(np.percentile(neg_arr, 25)) if len(neg_arr) else 0.0,
-            "p75": float(np.percentile(neg_arr, 75)) if len(neg_arr) else 0.0,
-            "p90": float(np.percentile(neg_arr, 90)) if len(neg_arr) else 0.0,
-        },
-        "contrast_ratio": contrast,
-        "p90_retain_threshold": p90_retain_thresh,
-    }
-
-
 def run_threshold_sensitivity(
     dataset_dir: Path, target_sensor: str, cfg: Dict[str, Any], split: str = "all"
 ) -> List[Dict[str, Any]]:
-    """Analysis E — Threshold sensitivity sweep over percentiles."""
-    percentiles = [90.0, 95.0, 97.0, 97.5, 98.0, 99.0, 99.5, 99.8]
+    """Analysis E — Threshold sensitivity sweep over percentiles [85, 90, 93, 95, 97, 97.5, 98, 99, 99.5]."""
+    percentiles = [85.0, 90.0, 93.0, 95.0, 97.0, 97.5, 98.0, 99.0, 99.5]
     sensor_files = filter_gt_files(dataset_dir, target_sensor, split)
 
     sweep_results: List[Dict[str, Any]] = []
@@ -724,6 +705,134 @@ def run_threshold_sensitivity(
         )
 
     return sweep_results
+
+
+def run_box_mode_comparison(
+    dataset_dir: Path, cfg: Dict[str, Any]
+) -> List[Dict[str, Any]]:
+    """3c — Compare scale, fixed, and extent box modes per sensor and split."""
+    results: List[Dict[str, Any]] = []
+
+    for sensor in ["DAVIS", "DVX", "EVK4"]:
+        for split in ["train", "test"]:
+            sensor_files = filter_gt_files(dataset_dir, sensor, split)
+            if not sensor_files:
+                continue
+
+            for b_mode in ["scale", "fixed", "extent"]:
+                test_cfg = deepcopy(cfg)
+                if sensor not in test_cfg:
+                    test_cfg[sensor] = {}
+                test_cfg[sensor]["box_mode"] = b_mode
+
+                tot_tp, tot_fp, tot_fn = 0, 0, 0
+                all_aps: List[float] = []
+                total_ms, total_windows = 0.0, 0
+
+                for gt_f in sensor_files:
+                    seq_name = gt_f.name.replace("_bb_windows_40ms.txt", "")
+                    npy_matches = list(gt_f.parent.glob(f"{seq_name}_labeled_events.npy"))
+                    if not npy_matches:
+                        npy_matches = list(dataset_dir.rglob(f"{seq_name}_labeled_events.npy"))
+                    if not npy_matches:
+                        continue
+
+                    events = load_events(npy_matches[0])
+                    width, height = infer_resolution(seq_name, events[:, 0], events[:, 1])
+
+                    gt_rows = []
+                    with open(gt_f, "r", encoding="utf-8") as f:
+                        rdr = csv.DictReader(f, delimiter="\t")
+                        for r in rdr:
+                            gt_rows.append(
+                                (
+                                    int(r["window_start_timestamp_us"]),
+                                    int(r["window_end_timestamp_us"]),
+                                    int(r["center_x"]),
+                                    int(r["center_y"]),
+                                    int(r["width"]),
+                                    int(r["height"]),
+                                )
+                            )
+
+                    start_t = time.perf_counter()
+                    window_boxes: List[Tuple[int, int, List[Dict[str, float]]]] = []
+                    for w_start, w_end, w_events in iter_windows(events, window_us=WINDOW_US):
+                        count_img, _, _ = event_image(w_events, width, height)
+                        boxes = detect_boxes(count_img, width, height, test_cfg)
+                        window_boxes.append((w_start, w_end, boxes))
+
+                    num_w = len(window_boxes)
+                    elapsed_ms = (time.perf_counter() - start_t) * 1000.0
+                    total_ms += elapsed_ms
+                    total_windows += num_w
+
+                    diagonal = math.hypot(width, height)
+                    max_dist = 0.05 * diagonal
+                    pred_rows: List[Tuple[int, int, int, int, int, int, float]] = []
+
+                    for w_idx in range(num_w):
+                        w_start, w_end, boxes = window_boxes[w_idx]
+                        if not boxes:
+                            continue
+                        prev_b = window_boxes[w_idx - 1][2] if w_idx > 0 else []
+                        next_b = (
+                            window_boxes[w_idx + 1][2] if w_idx < num_w - 1 else []
+                        )
+
+                        for box in boxes:
+                            hits = 1
+                            if any(
+                                math.hypot(box["center_x"] - p["center_x"], box["center_y"] - p["center_y"]) <= max_dist
+                                for p in prev_b
+                            ):
+                                hits += 1
+                            if any(
+                                math.hypot(box["center_x"] - n["center_x"], box["center_y"] - n["center_y"]) <= max_dist
+                                for n in next_b
+                            ):
+                                hits += 1
+
+                            if hits >= 2:
+                                conf = min(1.0, max(0.01, box["density"] * (hits / 3.0)))
+                                pred_rows.append(
+                                    (
+                                        w_start,
+                                        w_end,
+                                        int(round(box["center_x"])),
+                                        int(round(box["center_y"])),
+                                        int(round(box["width"])),
+                                        int(round(box["height"])),
+                                        conf,
+                                    )
+                                )
+
+                    eval_res = evaluate_sequence(gt_rows, pred_rows)
+                    tot_tp += eval_res["tp"]
+                    tot_fp += eval_res["fp"]
+                    tot_fn += eval_res["fn"]
+                    if not np.isnan(eval_res["ap"]):
+                        all_aps.append(eval_res["ap"])
+
+                prec, rec, f1 = compute_prf1(tot_tp, tot_fp, tot_fn)
+                mAP = float(np.mean(all_aps)) if all_aps else 0.0
+                ms_win = total_ms / total_windows if total_windows > 0 else 0.0
+
+                results.append(
+                    {
+                        "sensor": sensor,
+                        "split": split,
+                        "box_mode": b_mode,
+                        "mAP": mAP,
+                        "precision": prec,
+                        "recall": rec,
+                        "f1": f1,
+                        "ms_per_window": ms_win,
+                        "at_risk": ms_win > 30.0,
+                    }
+                )
+
+    return results
 
 
 def run_targeted_geometry_checks(
@@ -888,6 +997,11 @@ def main() -> None:
         help="Run Part 3 targeted geometry checks mode",
     )
     parser.add_argument(
+        "--compare-box-modes",
+        action="store_true",
+        help="Run 3c box mode comparison across scale, fixed, and extent",
+    )
+    parser.add_argument(
         "--out",
         type=str,
         default="experiments/recall_diagnostics.csv",
@@ -901,6 +1015,42 @@ def main() -> None:
     dataset_dir = Path(args.dataset_dir).resolve()
     sensor = args.sensor
     split = args.split
+
+    if args.compare_box_modes:
+        print("\n[INFO] Running 3c Box Mode Comparison (Scale vs Fixed vs Extent)...")
+        bm_res = run_box_mode_comparison(dataset_dir, cfg)
+        bm_table = [
+            [
+                r["sensor"],
+                r["split"],
+                r["box_mode"],
+                f"{r['mAP']:.6f}",
+                f"{r['precision']:.6f}",
+                f"{r['recall']:.6f}",
+                f"{r['f1']:.6f}",
+                f"{r['ms_per_window']:.2f}",
+                "AT RISK" if r["at_risk"] else "PASS",
+            ]
+            for r in bm_res
+        ]
+        print(
+            tabulate(
+                bm_table,
+                headers=[
+                    "Sensor",
+                    "Split",
+                    "Box Mode",
+                    "mAP@0.5",
+                    "Precision",
+                    "Recall",
+                    "F1",
+                    "ms/win",
+                    "Latency Guard",
+                ],
+                tablefmt="github",
+            )
+        )
+        return
 
     if args.check_geometry:
         print(f"\n[INFO] Running Targeted Geometry Checks for Sensor '{sensor}' (Split: {split})...")
@@ -927,18 +1077,31 @@ def main() -> None:
 
     print(f"\n[INFO] Running Recall Diagnostics for Sensor '{sensor}' (Split: {split})...")
 
+    gt_var = run_gt_variance_analysis(dataset_dir, sensor)
     oracle_res = run_oracle_analysis(dataset_dir, sensor, cfg, split)
     stage_res, miss_res = run_stagewise_and_miss_analysis(dataset_dir, sensor, cfg, split)
-    signal_res = run_signal_strength_analysis(dataset_dir, sensor, split)
     sens_res = run_threshold_sensitivity(dataset_dir, sensor, cfg, split)
 
-    print("\n--- ANALYSIS A: ORACLE CEILING ---")
+    print("\n--- 3a: GT BOX SIZE VARIANCE ---")
+    print(f"Total GT Boxes: {gt_var['total_gt_boxes']}")
+    print(f"Width CoV (std/mean): {gt_var['width_cov']:.4f}, Height CoV: {gt_var['height_cov']:.4f}")
+    print(f"Width Percentiles  [P10={gt_var['width_percentiles']['p10']:.1f}, P25={gt_var['width_percentiles']['p25']:.1f}, P50={gt_var['width_percentiles']['p50']:.1f}, P75={gt_var['width_percentiles']['p75']:.1f}, P90={gt_var['width_percentiles']['p90']:.1f}]")
+    print(f"Height Percentiles [P10={gt_var['height_percentiles']['p10']:.1f}, P25={gt_var['height_percentiles']['p25']:.1f}, P50={gt_var['height_percentiles']['p50']:.1f}, P75={gt_var['height_percentiles']['p75']:.1f}, P90={gt_var['height_percentiles']['p90']:.1f}]")
+    print(f"Max GT Boxes per Window: {gt_var['max_boxes_per_window']}, Fraction Multi-Box Windows: {gt_var['frac_multi_box_windows']:.4f}")
+
+    print("\n--- ANALYSIS A: NAIVE VS CLUSTERED ORACLE CEILING ---")
     oracle_table = [
         [
-            "Tight Box (label=1)",
-            f"{oracle_res['tight']['reach_iou50']:.4f}",
-            f"{oracle_res['tight']['mean_iou']:.4f}",
-            f"{oracle_res['tight']['median_iou']:.4f}",
+            "Naive Tight Box (All label=1)",
+            f"{oracle_res['naive_tight']['reach_iou50']:.4f}",
+            f"{oracle_res['naive_tight']['mean_iou']:.4f}",
+            f"{oracle_res['naive_tight']['median_iou']:.4f}",
+        ],
+        [
+            "Clustered Tight Box (Per-object)",
+            f"{oracle_res['clustered_tight']['reach_iou50']:.4f}",
+            f"{oracle_res['clustered_tight']['mean_iou']:.4f}",
+            f"{oracle_res['clustered_tight']['median_iou']:.4f}",
         ],
         [
             "Fixed Box (Unweighted Centroid)",
@@ -960,8 +1123,6 @@ def main() -> None:
             tablefmt="github",
         )
     )
-    print(f"Zero label==1 Event Windows: {oracle_res['zero_label_windows']} / {oracle_res['total_gt_windows']}")
-    print(f"Weighted Centroid Error (px vs GT): Mean={oracle_res['weighted']['c_err_mean']:.2f}, Median={oracle_res['weighted']['c_err_median']:.2f}, P90={oracle_res['weighted']['c_err_p90']:.2f}, Fraction within GT_width/3: {oracle_res['weighted']['within_gt_third']:.4f}")
 
     print("\n--- ANALYSIS B: STAGE-WISE RECALL ---")
     stage_table = [
@@ -990,24 +1151,6 @@ def main() -> None:
             tablefmt="github",
         )
     )
-    if miss_res["buckets"]["IOU_TOO_LOW"] > 0:
-        print(f"IOU_TOO_LOW IoU Stats: Mean={miss_res['iou_too_low_stats']['mean']:.4f}, Median={miss_res['iou_too_low_stats']['median']:.4f}, P10={miss_res['iou_too_low_stats']['p10']:.4f}, P90={miss_res['iou_too_low_stats']['p90']:.4f}")
-        print(f"IOU_TOO_LOW Offset Stats: Mean={miss_res['offset_stats']['mean']:.2f}px, Median={miss_res['offset_stats']['median']:.2f}px, P90={miss_res['offset_stats']['p90']:.2f}px")
-
-    print("\n--- ANALYSIS D: SIGNAL STRENGTH & CONTRAST ---")
-    signal_table = [
-        ["Positive Polarity Events", f"{signal_res['pos_events']['mean']:.2f}", f"{signal_res['pos_events']['median']:.2f}", f"{signal_res['pos_events']['p10']:.2f}", f"{signal_res['pos_events']['p25']:.2f}", f"{signal_res['pos_events']['p75']:.2f}", f"{signal_res['pos_events']['p90']:.2f}"],
-        ["Negative Polarity Events", f"{signal_res['neg_events']['mean']:.2f}", f"{signal_res['neg_events']['median']:.2f}", f"{signal_res['neg_events']['p10']:.2f}", f"{signal_res['neg_events']['p25']:.2f}", f"{signal_res['neg_events']['p75']:.2f}", f"{signal_res['neg_events']['p90']:.2f}"],
-    ]
-    print(
-        tabulate(
-            signal_table,
-            headers=["Metric", "Mean", "Median", "P10", "P25", "P75", "P90"],
-            tablefmt="github",
-        )
-    )
-    print(f"Signal-to-Background Contrast Ratio: {signal_res['contrast_ratio']:.2f}")
-    print(f"Percentile threshold to retain 90% of GT regions: {signal_res['p90_retain_threshold']:.2f}")
 
     print("\n--- ANALYSIS E: THRESHOLD SENSITIVITY ---")
     sens_table = [
@@ -1033,28 +1176,9 @@ def main() -> None:
     print("  FINDINGS BLOCK (MEASURED VALUES ONLY)")
     print("==================================================")
     print(f"Sensor: {sensor} (Split: {split})")
-    print(f"Oracle IoU Ceiling (Weighted Centroid): {oracle_res['weighted']['reach_iou50']:.4f}")
+    print(f"Naive Oracle Ceiling: {oracle_res['naive_tight']['reach_iou50']:.4f}, Clustered Oracle Ceiling: {oracle_res['clustered_tight']['reach_iou50']:.4f}")
     print(f"Largest Recall Drop Stage: {max(stage_res['drops'].items(), key=lambda x: x[1])[0]}")
     print(f"Measured Centroid Error: Mean={oracle_res['weighted']['c_err_mean']:.2f}px, Median={oracle_res['weighted']['c_err_median']:.2f}px, P90={oracle_res['weighted']['c_err_p90']:.2f}px")
-
-    out_path = Path(args.out)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(out_path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        writer.writerow(["sensor", "split", "oracle_w_ceiling", "s1_recall", "s2_recall", "s3_recall", "s4_recall", "c_err_mean", "c_err_median", "c_err_p90"])
-        writer.writerow([
-            sensor,
-            split,
-            f"{oracle_res['weighted']['reach_iou50']:.4f}",
-            f"{stage_res['recalls']['S1']:.4f}",
-            f"{stage_res['recalls']['S2']:.4f}",
-            f"{stage_res['recalls']['S3']:.4f}",
-            f"{stage_res['recalls']['S4']:.4f}",
-            f"{oracle_res['weighted']['c_err_mean']:.2f}",
-            f"{oracle_res['weighted']['c_err_median']:.2f}",
-            f"{oracle_res['weighted']['c_err_p90']:.2f}",
-        ])
-    print(f"\n[INFO] Diagnostics exported to CSV: {out_path}\n")
 
 
 if __name__ == "__main__":

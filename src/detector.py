@@ -1,4 +1,4 @@
-"""Object detector implementation for event count maps with box_mode and centroid_mode options."""
+"""Object detector implementation for event count maps with component splitting, extent box mode, and per-sensor config overrides."""
 
 from typing import Any, Dict, List
 import cv2
@@ -32,9 +32,31 @@ def detect_boxes(
     if num_nonzero < 4:
         return []
 
-    base_percentile = float(_get_val(cfg, "percentile", 97.5))
+    # Determine sensor family
+    if width >= 1200:
+        sensor_name = "EVK4"
+        def_scale, def_pad = 3.8, 10.0
+        def_bw, def_bh = 52.0, 56.0
+        def_min_dim, def_max_dim = 20.0, 80.0
+    elif width >= 600:
+        sensor_name = "DVX"
+        def_scale, def_pad = 1.5, 4.0
+        def_bw, def_bh = 18.0, 18.0
+        def_min_dim, def_max_dim = 12.0, 60.0
+    else:
+        sensor_name = "DAVIS"
+        def_scale, def_pad = 1.1, 1.5
+        def_bw, def_bh = 10.0, 12.0
+        def_min_dim, def_max_dim = 4.0, 30.0
 
-    # Dynamically scale percentile for ultra-dense windows to keep latency < 10ms
+    sensor_cfg = (
+        cfg.get(sensor_name, {}) if isinstance(cfg.get(sensor_name), dict) else {}
+    )
+
+    base_percentile = float(
+        _get_val(sensor_cfg, "percentile", _get_val(cfg, "percentile", 97.5))
+    )
+
     if num_nonzero > 1000:
         percentile = min(99.0, base_percentile + (num_nonzero - 1000) / 500.0)
     else:
@@ -44,82 +66,163 @@ def detect_boxes(
     thresh = max(1.0, raw_thresh)
 
     binary = (count_img >= thresh).astype(np.uint8)
-    if not np.any(binary):
+    if cv2.countNonZero(binary) < 4:
         return []
 
-    open_k = int(_get_val(cfg, "open_kernel", 2))
+    open_k = int(
+        _get_val(sensor_cfg, "open_kernel", _get_val(cfg, "open_kernel", 2))
+    )
     if open_k > 1:
         kernel_open = cv2.getStructuringElement(cv2.MORPH_RECT, (open_k, open_k))
         binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel_open)
+        if cv2.countNonZero(binary) < 4:
+            return []
 
-    dilate_k = int(_get_val(cfg, "dilate_kernel", 3))
+    dilate_k = int(
+        _get_val(sensor_cfg, "dilate_kernel", _get_val(cfg, "dilate_kernel", 3))
+    )
     if dilate_k > 1:
         kernel_dilate = cv2.getStructuringElement(cv2.MORPH_RECT, (dilate_k, dilate_k))
         binary = cv2.dilate(binary, kernel_dilate)
-
-    if not np.any(binary):
-        return []
+        if cv2.countNonZero(binary) < 4:
+            return []
 
     num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(
         binary, connectivity=8
     )
 
-    max_area = 0.02 * width * height
-    min_events = float(_get_val(cfg, "min_events_in_box", 6))
-    box_mode = str(_get_val(cfg, "box_mode", "scale")).lower()
-    centroid_mode = str(_get_val(cfg, "centroid_mode", "component")).lower()
+    max_area_frac = float(
+        _get_val(sensor_cfg, "max_area_frac", _get_val(cfg, "max_area_frac", 0.02))
+    )
+    max_area_pixels = max_area_frac * width * height
+    min_events = float(
+        _get_val(sensor_cfg, "min_events_in_box", _get_val(cfg, "min_events_in_box", 6))
+    )
 
-    # Determine sensor family
-    if width >= 1200:
-        sensor_name = "EVK4"
-        def_scale, def_pad = 3.8, 10.0
-        def_bw, def_bh = 52.0, 46.0
-    elif width >= 600:
-        sensor_name = "DVX"
-        def_scale, def_pad = 1.5, 4.0
-        def_bw, def_bh = 18.0, 18.0
-    else:
-        sensor_name = "DAVIS"
-        def_scale, def_pad = 1.1, 1.5
-        def_bw, def_bh = 10.0, 10.0
+    box_mode = str(
+        _get_val(sensor_cfg, "box_mode", _get_val(cfg, "box_mode", "scale"))
+    ).lower()
+    centroid_mode = str(
+        _get_val(sensor_cfg, "centroid_mode", _get_val(cfg, "centroid_mode", "component"))
+    ).lower()
 
-    sensor_cfg = cfg.get(sensor_name, {}) if isinstance(cfg.get(sensor_name), dict) else {}
+    box_scale = float(
+        _get_val(
+            sensor_cfg,
+            "box_scale",
+            _get_val(cfg, f"box_scale_{sensor_name.lower()}", _get_val(cfg, "box_scale", def_scale)),
+        )
+    )
+    box_pad = float(
+        _get_val(
+            sensor_cfg,
+            "box_pad",
+            _get_val(cfg, f"box_pad_{sensor_name.lower()}", _get_val(cfg, "box_pad", def_pad)),
+        )
+    )
+    box_w_cfg = float(
+        _get_val(
+            sensor_cfg,
+            "box_w",
+            _get_val(cfg, f"box_w_{sensor_name.lower()}", _get_val(cfg, "box_w", def_bw)),
+        )
+    )
+    box_h_cfg = float(
+        _get_val(
+            sensor_cfg,
+            "box_h",
+            _get_val(cfg, f"box_h_{sensor_name.lower()}", _get_val(cfg, "box_h", def_bh)),
+        )
+    )
 
-    box_scale = float(_get_val(sensor_cfg, "box_scale", _get_val(cfg, f"box_scale_{sensor_name.lower()}", _get_val(cfg, "box_scale", def_scale))))
-    box_pad = float(_get_val(sensor_cfg, "box_pad", _get_val(cfg, f"box_pad_{sensor_name.lower()}", _get_val(cfg, "box_pad", def_pad))))
-    box_w_cfg = float(_get_val(sensor_cfg, "box_w", _get_val(cfg, f"box_w_{sensor_name.lower()}", _get_val(cfg, "box_w", def_bw))))
-    box_h_cfg = float(_get_val(sensor_cfg, "box_h", _get_val(cfg, f"box_h_{sensor_name.lower()}", _get_val(cfg, "box_h", def_bh))))
+    min_dim = float(
+        _get_val(sensor_cfg, "min_dim", _get_val(cfg, "min_dim", def_min_dim))
+    )
+    max_dim = float(
+        _get_val(sensor_cfg, "max_dim", _get_val(cfg, "max_dim", def_max_dim))
+    )
+    extent_scale = float(
+        _get_val(sensor_cfg, "extent_scale", _get_val(cfg, "extent_scale", 1.0))
+    )
+    extent_pad = float(
+        _get_val(sensor_cfg, "extent_pad", _get_val(cfg, "extent_pad", 2.0))
+    )
 
-    results: List[Dict[str, float]] = []
+    # Component list after component splitting
+    final_components: List[Tuple[float, float, float, float, int]] = []
 
     for label_idx in range(1, num_labels):
         comp_area = float(stats[label_idx, cv2.CC_STAT_AREA])
-        if comp_area > max_area:
+        x_box = int(stats[label_idx, cv2.CC_STAT_LEFT])
+        y_box = int(stats[label_idx, cv2.CC_STAT_TOP])
+        w_box = int(stats[label_idx, cv2.CC_STAT_WIDTH])
+        h_box = int(stats[label_idx, cv2.CC_STAT_HEIGHT])
+
+        if comp_area > max_area_pixels:
+            # Component Splitting Path: re-threshold sub-image bounding box at higher percentile
+            sub_count = count_img[y_box : y_box + h_box, x_box : x_box + w_box]
+            sub_nonzero = sub_count[sub_count > 0]
+
+            if len(sub_nonzero) >= 4:
+                split_perc = min(99.5, percentile + 1.5)
+                split_thresh = float(np.percentile(sub_nonzero, split_perc))
+
+                sub_binary = (sub_count >= split_thresh).astype(np.uint8)
+                n_sub, l_sub, s_sub, _ = cv2.connectedComponentsWithStats(
+                    sub_binary, connectivity=8
+                )
+
+                for sub_i in range(1, n_sub):
+                    sub_area = float(s_sub[sub_i, cv2.CC_STAT_AREA])
+                    if sub_area <= max_area_pixels:
+                        sx = x_box + int(s_sub[sub_i, cv2.CC_STAT_LEFT])
+                        sy = y_box + int(s_sub[sub_i, cv2.CC_STAT_TOP])
+                        sw = int(s_sub[sub_i, cv2.CC_STAT_WIDTH])
+                        sh = int(s_sub[sub_i, cv2.CC_STAT_HEIGHT])
+                        final_components.append((float(sx), float(sy), float(sw), float(sh), sub_i))
             continue
 
-        comp_mask = labels == label_idx
-        comp_events = float(count_img[comp_mask].sum())
+        final_components.append((float(x_box), float(y_box), float(w_box), float(h_box), label_idx))
+
+    results: List[Dict[str, float]] = []
+
+    for x_box, y_box, w_box, h_box, label_idx in final_components:
+        x_int, y_int = int(x_box), int(y_box)
+        w_int, h_int = int(w_box), int(h_box)
+
+        sub_img = count_img[y_int : y_int + h_int, x_int : x_int + w_int]
+        sub_labels = labels[y_int : y_int + h_int, x_int : x_int + w_int]
+        sub_mask = sub_labels == label_idx
+
+        if sub_mask.any():
+            comp_events = float(sub_img[sub_mask].sum())
+        else:
+            comp_events = float(sub_img.sum())
+
         if comp_events < min_events:
             continue
 
-        x_box = float(stats[label_idx, cv2.CC_STAT_LEFT])
-        y_box = float(stats[label_idx, cv2.CC_STAT_TOP])
-        w_box = float(stats[label_idx, cv2.CC_STAT_WIDTH])
-        h_box = float(stats[label_idx, cv2.CC_STAT_HEIGHT])
+        center_comp_x = x_box + w_box / 2.0
+        center_comp_y = y_box + h_box / 2.0
 
-        if centroid_mode == "weighted" and comp_events > 0:
-            ys, xs = np.where(comp_mask)
-            weights = count_img[comp_mask]
-            center_x = float((xs * weights).sum() / comp_events)
-            center_y = float((ys * weights).sum() / comp_events)
+        if centroid_mode == "weighted" and comp_events > 0 and sub_mask.any():
+            ys, xs = np.where(sub_mask)
+            weights = sub_img[sub_mask]
+            center_x = x_box + float((xs * weights).sum() / comp_events)
+            center_y = y_box + float((ys * weights).sum() / comp_events)
         else:
-            center_x = x_box + w_box / 2.0
-            center_y = y_box + h_box / 2.0
+            center_x = center_comp_x
+            center_y = center_comp_y
 
         if box_mode == "fixed":
             new_w = box_w_cfg
             new_h = box_h_cfg
-        else:
+        elif box_mode == "extent":
+            raw_w = w_box * extent_scale + 2.0 * extent_pad
+            raw_h = h_box * extent_scale + 2.0 * extent_pad
+            new_w = max(min_dim, min(max_dim, raw_w))
+            new_h = max(min_dim, min(max_dim, raw_h))
+        else:  # scale mode
             new_w = w_box * box_scale + 2.0 * box_pad
             new_h = h_box * box_scale + 2.0 * box_pad
 
@@ -149,7 +252,7 @@ def detect_boxes(
                 "center_y": clamped_cy,
                 "width": clamped_w,
                 "height": clamped_h,
-                "area": comp_area,
+                "area": w_box * h_box,
                 "events": comp_events,
                 "density": density,
                 "aspect": aspect,
