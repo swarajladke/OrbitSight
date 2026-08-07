@@ -244,7 +244,7 @@ def run_oracle_analysis(
 def run_stagewise_and_miss_analysis(
     dataset_dir: Path, target_sensor: str, cfg: Dict[str, Any], split: str = "all"
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    """Analysis B & C — Stage-wise recall and miss attribution."""
+    """Analysis B & C — Memory-efficient Stage-wise recall and miss attribution."""
     sensor_files = filter_gt_files(dataset_dir, target_sensor, split)
 
     sensor_cfg = (
@@ -290,13 +290,6 @@ def run_stagewise_and_miss_analysis(
         diagonal = math.hypot(width, height)
         max_dist = 0.05 * diagonal
 
-        window_data: List[Tuple[int, int, np.ndarray, np.ndarray]] = []
-        for w_start, w_end, w_events in iter_windows(events, window_us=WINDOW_US):
-            count_img, _, _ = event_image(w_events, width, height)
-            window_data.append((w_start, w_end, count_img, w_events))
-
-        num_windows = len(window_data)
-
         gt_by_window: Dict[int, List[Tuple[float, float, float, float]]] = {}
         with open(gt_f, "r", encoding="utf-8") as f:
             rdr = csv.DictReader(f, delimiter="\t")
@@ -311,20 +304,26 @@ def run_stagewise_and_miss_analysis(
                     )
                 )
 
-        w_s1_boxes: List[List[Tuple[float, float, float, float]]] = []
-        w_s2_boxes: List[List[Tuple[float, float, float, float]]] = []
-        w_s3_boxes: List[List[Tuple[float, float, float, float]]] = []
-        w_s4_boxes: List[List[Tuple[float, float, float, float]]] = []
+        window_list: List[Tuple[int, int, List[Tuple[float, float, float, float]], List[Tuple[float, float, float, float]], List[Tuple[float, float, float, float]], List[Tuple[float, float, float, float]]]] = []
 
-        for w_idx in range(num_windows):
-            w_start, w_end, count_img, w_ev = window_data[w_idx]
+        w_idx = 0
+        w_s3_boxes_list: List[List[Tuple[float, float, float, float]]] = []
+        w_s1_boxes_list: List[List[Tuple[float, float, float, float]]] = []
+        w_s2_boxes_list: List[List[Tuple[float, float, float, float]]] = []
+        w_meta: List[Tuple[int, int, np.ndarray, int]] = []
+
+        for w_start, w_end, w_events in iter_windows(events, window_us=WINDOW_US):
+            # Transient window analysis
+            count_img, _, _ = event_image(w_events, width, height)
             nonzero_vals = count_img[count_img > 0]
 
             if len(nonzero_vals) < 4:
-                w_s1_boxes.append([])
-                w_s2_boxes.append([])
-                w_s3_boxes.append([])
-                w_s4_boxes.append([])
+                w_s1_boxes_list.append([])
+                w_s2_boxes_list.append([])
+                w_s3_boxes_list.append([])
+                w_meta.append((w_start, w_end, np.zeros((0, 6)), 0))
+                del count_img
+                w_idx += 1
                 continue
 
             raw_thresh = float(np.percentile(nonzero_vals, percentile))
@@ -343,7 +342,7 @@ def run_stagewise_and_miss_analysis(
                 )
                 for i in range(1, num_l1)
             ]
-            w_s1_boxes.append(s1_b)
+            w_s1_boxes_list.append(s1_b)
 
             b_s2 = b_s1.copy()
             if open_k > 1:
@@ -369,7 +368,7 @@ def run_stagewise_and_miss_analysis(
                 )
                 for i in range(1, num_l2)
             ]
-            w_s2_boxes.append(s2_b)
+            w_s2_boxes_list.append(s2_b)
 
             s3_dets = detect_boxes(count_img, width, height, cfg)
             s3_b = [
@@ -381,12 +380,22 @@ def run_stagewise_and_miss_analysis(
                 )
                 for b in s3_dets
             ]
-            w_s3_boxes.append(s3_b)
+            w_s3_boxes_list.append(s3_b)
+            w_meta.append((w_start, w_end, w_events, len(w_events)))
+            del count_img
+            w_idx += 1
 
-        for w_idx in range(num_windows):
-            s3_b = w_s3_boxes[w_idx]
-            prev_b = w_s3_boxes[w_idx - 1] if w_idx > 0 else []
-            next_b = w_s3_boxes[w_idx + 1] if w_idx < num_windows - 1 else []
+        num_windows = len(w_meta)
+
+        # Stage 4 & GT evaluation
+        for idx in range(num_windows):
+            w_start, w_end, w_ev, ev_cnt = w_meta[idx]
+            if w_start not in gt_by_window:
+                continue
+
+            s3_b = w_s3_boxes_list[idx]
+            prev_b = w_s3_boxes_list[idx - 1] if idx > 0 else []
+            next_b = w_s3_boxes_list[idx + 1] if idx < num_windows - 1 else []
 
             s4_b = []
             for box in s3_b:
@@ -403,21 +412,18 @@ def run_stagewise_and_miss_analysis(
                     hits += 1
                 if min_hits < 2 or hits >= min_hits:
                     s4_b.append(box)
-            w_s4_boxes.append(s4_b)
 
-        for w_idx in range(num_windows):
-            w_start, _, count_img, w_ev = window_data[w_idx]
-            if w_start not in gt_by_window:
-                continue
+            w_s1_b = w_s1_boxes_list[idx]
+            w_s2_b = w_s2_boxes_list[idx]
 
             for gt_box in gt_by_window[w_start]:
                 total_gt += 1
                 gt_cx, gt_cy, gt_w, gt_h = gt_box
 
-                m1 = any(iou(b, gt_box) >= 0.5 for b in w_s1_boxes[w_idx])
-                m2 = any(iou(b, gt_box) >= 0.5 for b in w_s2_boxes[w_idx])
-                m3 = any(iou(b, gt_box) >= 0.5 for b in w_s3_boxes[w_idx])
-                m4 = any(iou(b, gt_box) >= 0.5 for b in w_s4_boxes[w_idx])
+                m1 = any(iou(b, gt_box) >= 0.5 for b in w_s1_b)
+                m2 = any(iou(b, gt_box) >= 0.5 for b in w_s2_b)
+                m3 = any(iou(b, gt_box) >= 0.5 for b in s3_b)
+                m4 = any(iou(b, gt_box) >= 0.5 for b in s4_b)
 
                 if m1:
                     s1_matched += 1
@@ -429,18 +435,10 @@ def run_stagewise_and_miss_analysis(
                     s4_matched += 1
 
                 if not m4:
-                    if len(w_ev) == 0:
+                    if ev_cnt == 0:
                         miss_buckets["NO_EVENTS"] += 1
                     elif not m1:
-                        x1 = max(0, int(gt_cx - gt_w / 2.0))
-                        y1 = max(0, int(gt_cy - gt_h / 2.0))
-                        x2 = min(width, int(gt_cx + gt_w / 2.0))
-                        y2 = min(height, int(gt_cy + gt_h / 2.0))
-                        gt_region = count_img[y1:y2, x1:x2]
-                        if gt_region.size == 0 or gt_region.max() == 0:
-                            miss_buckets["NO_EVENTS"] += 1
-                        else:
-                            miss_buckets["BELOW_THRESHOLD"] += 1
+                        miss_buckets["BELOW_THRESHOLD"] += 1
                     elif not m2:
                         miss_buckets["LOST_TO_MORPHOLOGY"] += 1
                     elif not m3:
@@ -450,7 +448,7 @@ def run_stagewise_and_miss_analysis(
                     else:
                         best_iou = 0.0
                         best_off = 0.0
-                        for b in w_s4_boxes[w_idx]:
+                        for b in s4_b:
                             score = iou(b, gt_box)
                             if score > best_iou:
                                 best_iou = score
