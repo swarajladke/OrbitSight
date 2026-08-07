@@ -2,6 +2,7 @@
 
 import argparse
 import csv
+from copy import deepcopy
 import math
 from pathlib import Path
 import sys
