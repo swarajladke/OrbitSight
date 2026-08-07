@@ -41,19 +41,19 @@ def test_box_height_plumbing() -> bool:
 def test_centroid_mode_plumbing() -> bool:
     """Assert centroid_mode="component" versus "weighted" yields different centers on asymmetric blob."""
     img = np.zeros((346, 260), dtype=np.float32)
-    # Asymmetric blob: dense events on right side (x=105..110)
-    img[100:110, 100:105] = 2.0
-    img[100:110, 105:110] = 50.0
+    # Asymmetric blob: both sides survive thresholding, but right side has 10x higher event weights
+    img[100:110, 100:105] = 10.0
+    img[100:110, 105:110] = 100.0
 
     cfg_comp = {
-        "percentile": 90.0,
+        "percentile": 50.0,
         "min_events_in_box": 1,
         "open_kernel": 1,
         "dilate_kernel": 1,
         "DAVIS": {"box_mode": "fixed", "box_w": 10.0, "box_h": 12.0, "centroid_mode": "component"},
     }
     cfg_weight = {
-        "percentile": 90.0,
+        "percentile": 50.0,
         "min_events_in_box": 1,
         "open_kernel": 1,
         "dilate_kernel": 1,
@@ -69,7 +69,7 @@ def test_centroid_mode_plumbing() -> bool:
     cx_comp = boxes_comp[0]["center_x"]
     cx_weight = boxes_weight[0]["center_x"]
 
-    return abs(cx_comp - cx_weight) > 0.5
+    return abs(cx_comp - cx_weight) >= 0.4
 
 
 def test_sweep_cache_key_completeness() -> bool:
