@@ -1,14 +1,17 @@
-# Default global detector parameters
+# Global baseline defaults
 percentile: 97.5
 min_events_in_box: 6
 open_kernel: 2
 dilate_kernel: 3
 min_hits: 2
-box_mode: "extent"
+box_mode: "fixed"
 centroid_mode: "weighted"
 max_area_frac: 0.02
+nms_iou: 0.3
+conf_min: 0.05
+max_candidates_per_window: 5
 
-# Per-sensor optimal parameter overrides
+# Per-sensor locked optimal configurations
 EVK4:
   percentile: 97.5
   min_events_in_box: 8
@@ -24,14 +27,17 @@ EVK4:
   max_dim: 80
   extent_scale: 1.0
   extent_pad: 4.0
+  nms_iou: 0.3
+  conf_min: 0.05
+  max_candidates_per_window: 5
 
 DVX:
-  percentile: 97.5
+  percentile: 85.0
   min_events_in_box: 6
-  open_kernel: 2
+  open_kernel: 1
   dilate_kernel: 3
   min_hits: 2
-  box_mode: "extent"
+  box_mode: "fixed"
   centroid_mode: "weighted"
   box_w: 18
   box_h: 18
@@ -40,9 +46,12 @@ DVX:
   max_dim: 60
   extent_scale: 1.2
   extent_pad: 4.0
+  nms_iou: 0.3
+  conf_min: 0.05
+  max_candidates_per_window: 5
 
 DAVIS:
-  percentile: 97.5
+  percentile: 97.0
   min_events_in_box: 4
   open_kernel: 1
   dilate_kernel: 3
@@ -56,3 +65,6 @@ DAVIS:
   max_dim: 30
   extent_scale: 1.1
   extent_pad: 2.0
+  nms_iou: 0.3
+  conf_min: 0.05
+  max_candidates_per_window: 5

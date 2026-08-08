@@ -1,16 +1,11 @@
-"""Object detector implementation for event count maps with component splitting, extent box mode, and per-sensor config overrides."""
+"""Object detector implementation for event count maps with component splitting, extent box mode, NMS, and resolved per-sensor configs."""
 
 from typing import Any, Dict, List
 import cv2
 import numpy as np
 
-
-def _get_val(cfg: Dict[str, Any], key: str, default: Any) -> Any:
-    """Helper to extract parameter from config or list."""
-    val = cfg.get(key, default)
-    if isinstance(val, list):
-        return val[0]
-    return val
+from src.common import resolve_effective_config
+from src.nms import apply_nms
 
 
 def detect_boxes(
@@ -49,13 +44,9 @@ def detect_boxes(
         def_bw, def_bh = 10.0, 12.0
         def_min_dim, def_max_dim = 4.0, 30.0
 
-    sensor_cfg = (
-        cfg.get(sensor_name, {}) if isinstance(cfg.get(sensor_name), dict) else {}
-    )
+    eff = resolve_effective_config(cfg, sensor_name)
 
-    base_percentile = float(
-        _get_val(sensor_cfg, "percentile", _get_val(cfg, "percentile", 97.5))
-    )
+    base_percentile = float(eff.get("percentile", 97.5))
 
     if num_nonzero > 1000:
         percentile = min(99.0, base_percentile + (num_nonzero - 1000) / 500.0)
@@ -69,18 +60,14 @@ def detect_boxes(
     if cv2.countNonZero(binary) < 4:
         return []
 
-    open_k = int(
-        _get_val(sensor_cfg, "open_kernel", _get_val(cfg, "open_kernel", 2))
-    )
+    open_k = int(eff.get("open_kernel", 2))
     if open_k > 1:
         kernel_open = cv2.getStructuringElement(cv2.MORPH_RECT, (open_k, open_k))
         binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel_open)
         if cv2.countNonZero(binary) < 4:
             return []
 
-    dilate_k = int(
-        _get_val(sensor_cfg, "dilate_kernel", _get_val(cfg, "dilate_kernel", 3))
-    )
+    dilate_k = int(eff.get("dilate_kernel", 3))
     if dilate_k > 1:
         kernel_dilate = cv2.getStructuringElement(cv2.MORPH_RECT, (dilate_k, dilate_k))
         binary = cv2.dilate(binary, kernel_dilate)
@@ -91,62 +78,31 @@ def detect_boxes(
         binary, connectivity=8
     )
 
-    max_area_frac = float(
-        _get_val(sensor_cfg, "max_area_frac", _get_val(cfg, "max_area_frac", 0.02))
-    )
+    max_area_frac = float(eff.get("max_area_frac", 0.02))
     max_area_pixels = max_area_frac * width * height
-    min_events = float(
-        _get_val(sensor_cfg, "min_events_in_box", _get_val(cfg, "min_events_in_box", 6))
-    )
+    min_events = float(eff.get("min_events_in_box", 6))
 
-    box_mode = str(
-        _get_val(sensor_cfg, "box_mode", _get_val(cfg, "box_mode", "scale"))
-    ).lower()
-    centroid_mode = str(
-        _get_val(sensor_cfg, "centroid_mode", _get_val(cfg, "centroid_mode", "component"))
-    ).lower()
+    box_mode = str(eff.get("box_mode", "scale")).lower()
+    centroid_mode = str(eff.get("centroid_mode", "component")).lower()
 
-    box_scale = float(
-        _get_val(
-            sensor_cfg,
-            "box_scale",
-            _get_val(cfg, f"box_scale_{sensor_name.lower()}", _get_val(cfg, "box_scale", def_scale)),
-        )
-    )
-    box_pad = float(
-        _get_val(
-            sensor_cfg,
-            "box_pad",
-            _get_val(cfg, f"box_pad_{sensor_name.lower()}", _get_val(cfg, "box_pad", def_pad)),
-        )
-    )
-    box_w_cfg = float(
-        _get_val(
-            sensor_cfg,
-            "box_w",
-            _get_val(cfg, f"box_w_{sensor_name.lower()}", _get_val(cfg, "box_w", def_bw)),
-        )
-    )
-    box_h_cfg = float(
-        _get_val(
-            sensor_cfg,
-            "box_h",
-            _get_val(cfg, f"box_h_{sensor_name.lower()}", _get_val(cfg, "box_h", def_bh)),
-        )
-    )
+    box_scale = float(eff.get("box_scale", def_scale))
+    box_pad = float(eff.get("box_pad", def_pad))
+    box_w_cfg = float(eff.get("box_w", def_bw))
+    box_h_cfg = float(eff.get("box_h", def_bh))
 
-    min_dim = float(
-        _get_val(sensor_cfg, "min_dim", _get_val(cfg, "min_dim", def_min_dim))
-    )
-    max_dim = float(
-        _get_val(sensor_cfg, "max_dim", _get_val(cfg, "max_dim", def_max_dim))
-    )
-    extent_scale = float(
-        _get_val(sensor_cfg, "extent_scale", _get_val(cfg, "extent_scale", 1.0))
-    )
-    extent_pad = float(
-        _get_val(sensor_cfg, "extent_pad", _get_val(cfg, "extent_pad", 2.0))
-    )
+    min_dim = float(eff.get("min_dim", def_min_dim))
+    max_dim = float(eff.get("max_dim", def_max_dim))
+    extent_scale = float(eff.get("extent_scale", 1.0))
+    extent_pad = float(eff.get("extent_pad", 2.0))
+
+    nms_iou_val = eff.get("nms_iou", 0.3)
+    conf_min_val = float(eff.get("conf_min", 0.0))
+    max_cand_val = eff.get("max_candidates_per_window", None)
+    if max_cand_val is not None:
+        try:
+            max_cand_val = int(max_cand_val)
+        except (TypeError, ValueError):
+            max_cand_val = None
 
     # Component list after component splitting
     final_components: List[Tuple[float, float, float, float, int]] = []
@@ -246,6 +202,11 @@ def detect_boxes(
         density = comp_events / box_area_calc if box_area_calc > 0 else 0.0
         aspect = clamped_w / clamped_h if clamped_h > 0 else 1.0
 
+        conf = min(1.0, max(0.01, density * 1.5))
+
+        if conf < conf_min_val:
+            continue
+
         results.append(
             {
                 "center_x": clamped_cx,
@@ -256,7 +217,21 @@ def detect_boxes(
                 "events": comp_events,
                 "density": density,
                 "aspect": aspect,
+                "confidence": conf,
             }
         )
+
+    # Apply NMS
+    if nms_iou_val is not None:
+        try:
+            nms_thresh = float(nms_iou_val)
+            results = apply_nms(results, nms_thresh)
+        except (TypeError, ValueError):
+            pass
+
+    # Top-K candidate filtering per window
+    if max_cand_val is not None and max_cand_val > 0 and len(results) > max_cand_val:
+        results.sort(key=lambda b: b["confidence"], reverse=True)
+        results = results[:max_cand_val]
 
     return results

@@ -1,11 +1,35 @@
 """Common utilities, data loading, and event processing functions."""
 
 from pathlib import Path
-from typing import Generator, Optional, Tuple, Union
+from typing import Any, Dict, Generator, Optional, Tuple, Union
 import numpy as np
 
 WINDOW_US: int = 40_000
 LARGE_FILE_THRESHOLD_BYTES: int = 500 * 1024 * 1024  # 500 MB
+
+
+def resolve_effective_config(cfg: Dict[str, Any], sensor_name: str) -> Dict[str, Any]:
+    """Resolve and merge global defaults with sensor-specific overrides."""
+    sensor_cfg = cfg.get(sensor_name, {}) if isinstance(cfg.get(sensor_name), dict) else {}
+    effective: Dict[str, Any] = {}
+    for k, v in cfg.items():
+        if k not in ("EVK4", "DVX", "DAVIS") and not isinstance(v, dict):
+            effective[k] = v[0] if isinstance(v, list) else v
+    for k, v in sensor_cfg.items():
+        effective[k] = v[0] if isinstance(v, list) else v
+    return effective
+
+
+def print_effective_config(cfg: Dict[str, Any]) -> None:
+    """Print fully resolved effective configuration for all sensors."""
+    print("\n==================================================")
+    print("  RESOLVED EFFECTIVE CONFIGURATION PER SENSOR")
+    print("==================================================")
+    for sensor in ["DAVIS", "DVX", "EVK4"]:
+        eff = resolve_effective_config(cfg, sensor)
+        items_str = ", ".join(f"{k}: {v}" for k, v in sorted(eff.items()))
+        print(f"[{sensor} EFFECTIVE CONFIG]: {items_str}")
+    print("==================================================\n")
 
 
 def sequence_name_from_npy(path: Union[str, Path]) -> str:
@@ -56,7 +80,7 @@ def infer_resolution(
 
 
 def load_events(path: Union[str, Path]) -> np.ndarray:
-    """Load event data from .npy file, using memory-mapping for files > 500 MB.
+    """Load event data from .npy file into contiguous RAM for instant window slicing.
 
     Args:
         path: Path to the .npy file.
@@ -65,9 +89,7 @@ def load_events(path: Union[str, Path]) -> np.ndarray:
         NumPy array of shape (N, 6) containing event data.
     """
     file_path = Path(path)
-    file_size = file_path.stat().st_size
-    mmap_mode = "r" if file_size > LARGE_FILE_THRESHOLD_BYTES else None
-    return np.load(file_path, allow_pickle=False, mmap_mode=mmap_mode)
+    return np.load(file_path, allow_pickle=False)
 
 
 def iter_windows(
