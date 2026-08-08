@@ -106,56 +106,66 @@ def compute_auc(labels: np.ndarray, scores: np.ndarray) -> float:
 def run_conf_min_sweep(
     dataset_dir: Path, target_sensor: str, base_cfg: Dict[str, Any]
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-    """Part 3 — Sweep conf_min over [0.0, 0.05, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7]."""
+    """Part 3 — Fast pre-computed sweep of conf_min over [0.0, 0.05, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7]."""
     conf_min_list = [0.0, 0.05, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7]
 
     gt_files = sorted(list(dataset_dir.rglob("*_bb_windows_40ms.txt")))
     sensor_files = [f for f in gt_files if target_sensor.upper() in f.name.upper()]
 
+    # Fast single pass candidate extraction per sequence
+    seq_data: List[Tuple[List[Tuple[int, int, int, int, int, int]], List[Tuple[int, int, List[Dict[str, float]]]]]] = []
+
+    base_test_cfg = deepcopy(base_cfg)
+    if target_sensor not in base_test_cfg:
+        base_test_cfg[target_sensor] = {}
+    base_test_cfg[target_sensor]["conf_min"] = 0.0
+
+    for gt_f in sensor_files:
+        seq_name = gt_f.name.replace("_bb_windows_40ms.txt", "")
+        npy_matches = list(gt_f.parent.glob(f"{seq_name}_labeled_events.npy"))
+        if not npy_matches:
+            npy_matches = list(dataset_dir.rglob(f"{seq_name}_labeled_events.npy"))
+        if not npy_matches:
+            continue
+
+        events = load_events(npy_matches[0])
+        width, height = infer_resolution(seq_name, events[:, 0], events[:, 1])
+
+        gt_rows = []
+        with open(gt_f, "r", encoding="utf-8") as f:
+            rdr = csv.DictReader(f, delimiter="\t")
+            for r in rdr:
+                gt_rows.append(
+                    (
+                        int(r["window_start_timestamp_us"]),
+                        int(r["window_end_timestamp_us"]),
+                        int(r["center_x"]),
+                        int(r["center_y"]),
+                        int(r["width"]),
+                        int(r["height"]),
+                    )
+                )
+
+        w_boxes: List[Tuple[int, int, List[Dict[str, float]]]] = []
+        for w_start, w_end, w_events in iter_windows(events, window_us=WINDOW_US):
+            count_img, _, _ = event_image(w_events, width, height)
+            boxes = detect_boxes(count_img, width, height, base_test_cfg)
+            w_boxes.append((w_start, w_end, boxes))
+
+        seq_data.append((gt_rows, w_boxes))
+
     sweep_rows: List[Dict[str, Any]] = []
 
     for c_min in conf_min_list:
-        test_cfg = deepcopy(base_cfg)
-        if target_sensor not in test_cfg:
-            test_cfg[target_sensor] = {}
-        test_cfg[target_sensor]["conf_min"] = c_min
-
         tot_tp, tot_fp, tot_fn = 0, 0, 0
         tot_pred = 0
         all_aps: List[float] = []
 
-        for gt_f in sensor_files:
-            seq_name = gt_f.name.replace("_bb_windows_40ms.txt", "")
-            npy_matches = list(gt_f.parent.glob(f"{seq_name}_labeled_events.npy"))
-            if not npy_matches:
-                npy_matches = list(dataset_dir.rglob(f"{seq_name}_labeled_events.npy"))
-            if not npy_matches:
-                continue
-
-            events = load_events(npy_matches[0])
-            width, height = infer_resolution(seq_name, events[:, 0], events[:, 1])
-
-            gt_rows = []
-            with open(gt_f, "r", encoding="utf-8") as f:
-                rdr = csv.DictReader(f, delimiter="\t")
-                for r in rdr:
-                    gt_rows.append(
-                        (
-                            int(r["window_start_timestamp_us"]),
-                            int(r["window_end_timestamp_us"]),
-                            int(r["center_x"]),
-                            int(r["center_y"]),
-                            int(r["width"]),
-                            int(r["height"]),
-                        )
-                    )
-
+        for gt_rows, w_boxes in seq_data:
             pred_rows: List[Tuple[int, int, int, int, int, int, float]] = []
-            for w_start, w_end, w_events in iter_windows(events, window_us=WINDOW_US):
-                count_img, _, _ = event_image(w_events, width, height)
-                boxes = detect_boxes(count_img, width, height, test_cfg)
+            for w_start, w_end, boxes in w_boxes:
                 for b in boxes:
-                    conf = b.get("confidence", 0.01)
+                    conf = float(b.get("confidence", 0.01))
                     if conf >= c_min:
                         pred_rows.append(
                             (
@@ -200,7 +210,6 @@ def run_conf_min_sweep(
     mAP_at_best_f1 = best_f1_row["mAP"]
     mAP_sacrificed = best_mAP_row["mAP"] - mAP_at_best_f1
 
-    # Check joint single value optimization
     joint_opt_found = False
     joint_conf_min = None
     max_f1 = best_f1_row["f1"]
@@ -229,55 +238,68 @@ def run_conf_min_sweep(
 def run_topk_sweep(
     dataset_dir: Path, target_sensor: str, base_cfg: Dict[str, Any]
 ) -> List[Dict[str, Any]]:
-    """Part 3 — Sweep max_candidates_per_window over [1, 2, 3, 5, 8, 15, None]."""
+    """Part 3 — Fast pre-computed sweep of max_candidates_per_window over [1, 2, 3, 5, 8, 15, None]."""
     k_list = [1, 2, 3, 5, 8, 15, None]
 
     gt_files = sorted(list(dataset_dir.rglob("*_bb_windows_40ms.txt")))
     sensor_files = [f for f in gt_files if target_sensor.upper() in f.name.upper()]
 
+    seq_data: List[Tuple[List[Tuple[int, int, int, int, int, int]], List[Tuple[int, int, List[Dict[str, float]]]]]] = []
+
+    base_test_cfg = deepcopy(base_cfg)
+    if target_sensor not in base_test_cfg:
+        base_test_cfg[target_sensor] = {}
+    base_test_cfg[target_sensor]["max_candidates_per_window"] = None
+
+    for gt_f in sensor_files:
+        seq_name = gt_f.name.replace("_bb_windows_40ms.txt", "")
+        npy_matches = list(gt_f.parent.glob(f"{seq_name}_labeled_events.npy"))
+        if not npy_matches:
+            npy_matches = list(dataset_dir.rglob(f"{seq_name}_labeled_events.npy"))
+        if not npy_matches:
+            continue
+
+        events = load_events(npy_matches[0])
+        width, height = infer_resolution(seq_name, events[:, 0], events[:, 1])
+
+        gt_rows = []
+        with open(gt_f, "r", encoding="utf-8") as f:
+            rdr = csv.DictReader(f, delimiter="\t")
+            for r in rdr:
+                gt_rows.append(
+                    (
+                        int(r["window_start_timestamp_us"]),
+                        int(r["window_end_timestamp_us"]),
+                        int(r["center_x"]),
+                        int(r["center_y"]),
+                        int(r["width"]),
+                        int(r["height"]),
+                    )
+                )
+
+        w_boxes: List[Tuple[int, int, List[Dict[str, float]]]] = []
+        for w_start, w_end, w_events in iter_windows(events, window_us=WINDOW_US):
+            count_img, _, _ = event_image(w_events, width, height)
+            boxes = detect_boxes(count_img, width, height, base_test_cfg)
+            w_boxes.append((w_start, w_end, boxes))
+
+        seq_data.append((gt_rows, w_boxes))
+
     sweep_rows: List[Dict[str, Any]] = []
 
     for k_val in k_list:
-        test_cfg = deepcopy(base_cfg)
-        if target_sensor not in test_cfg:
-            test_cfg[target_sensor] = {}
-        test_cfg[target_sensor]["max_candidates_per_window"] = k_val
-
         tot_tp, tot_fp, tot_fn = 0, 0, 0
         tot_pred = 0
         all_aps: List[float] = []
 
-        for gt_f in sensor_files:
-            seq_name = gt_f.name.replace("_bb_windows_40ms.txt", "")
-            npy_matches = list(gt_f.parent.glob(f"{seq_name}_labeled_events.npy"))
-            if not npy_matches:
-                npy_matches = list(dataset_dir.rglob(f"{seq_name}_labeled_events.npy"))
-            if not npy_matches:
-                continue
-
-            events = load_events(npy_matches[0])
-            width, height = infer_resolution(seq_name, events[:, 0], events[:, 1])
-
-            gt_rows = []
-            with open(gt_f, "r", encoding="utf-8") as f:
-                rdr = csv.DictReader(f, delimiter="\t")
-                for r in rdr:
-                    gt_rows.append(
-                        (
-                            int(r["window_start_timestamp_us"]),
-                            int(r["window_end_timestamp_us"]),
-                            int(r["center_x"]),
-                            int(r["center_y"]),
-                            int(r["width"]),
-                            int(r["height"]),
-                        )
-                    )
-
+        for gt_rows, w_boxes in seq_data:
             pred_rows: List[Tuple[int, int, int, int, int, int, float]] = []
-            for w_start, w_end, w_events in iter_windows(events, window_us=WINDOW_US):
-                count_img, _, _ = event_image(w_events, width, height)
-                boxes = detect_boxes(count_img, width, height, test_cfg)
-                for b in boxes:
+            for w_start, w_end, boxes in w_boxes:
+                sub_b = boxes
+                if k_val is not None and len(sub_b) > k_val:
+                    sub_b = sorted(sub_b, key=lambda b: float(b.get("confidence", 0.01)), reverse=True)[:k_val]
+
+                for b in sub_b:
                     pred_rows.append(
                         (
                             w_start,
