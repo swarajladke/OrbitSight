@@ -1,27 +1,24 @@
-"""Authoritative scoreboard generation and run history logging for OrbitSight."""
+"""Authoritative scoreboard generation, prediction file scoring, and run history logging for OrbitSight."""
 
 import argparse
 import csv
+import datetime
 import hashlib
 from pathlib import Path
 import sys
 import time
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 from tabulate import tabulate
 
 from src.common import (
     WINDOW_US,
-    event_image,
     infer_resolution,
-    iter_windows,
     load_events,
     print_effective_config,
-    resolve_effective_config,
-    sequence_name_from_npy,
 )
-from src.detector import detect_boxes
-from src.metrics import compute_ap, compute_prf1, evaluate_sequence
+from src.metrics import compute_prf1, evaluate_sequence
+from src.pipeline import run_sequence
 
 
 def load_yaml_config(path: Path) -> Dict[str, Any]:
@@ -86,10 +83,38 @@ def compute_config_hash(cfg_path: Path) -> str:
     return sha.hexdigest()[:12]
 
 
-def run_full_inference_on_dataset(
-    dataset_dir: Path, cfg: Dict[str, Any]
+def load_pred_file(pred_path: Path) -> List[Tuple[int, int, int, int, int, int, float]]:
+    """Load predictions from written _pred.txt file."""
+    if not pred_path.exists():
+        return []
+    rows: List[Tuple[int, int, int, int, int, int, float]] = []
+    with open(pred_path, "r", encoding="utf-8") as f:
+        rdr = csv.DictReader(f, delimiter="\t")
+        for r in rdr:
+            rows.append(
+                (
+                    int(r["window_start_timestamp_us"]),
+                    int(r["window_end_timestamp_us"]),
+                    int(r["center_x"]),
+                    int(r["center_y"]),
+                    int(r["width"]),
+                    int(r["height"]),
+                    float(r["confidence"]),
+                )
+            )
+    return rows
+
+
+def evaluate_dataset_sequences(
+    dataset_dir: Path,
+    pred_dir: Path,
+    cfg: Dict[str, Any],
+    split_filter: str = "train",
+    recompute: bool = False,
+    sequences: Optional[List[str]] = None,
+    max_windows: float = float("inf"),
 ) -> List[Dict[str, Any]]:
-    """Run current configuration across all 21 dataset sequences in-process."""
+    """Evaluate dataset sequences either by reading prediction files or recomputing."""
     gt_files = sorted(list(dataset_dir.rglob("*_bb_windows_40ms.txt")))
     sequence_results: List[Dict[str, Any]] = []
 
@@ -97,24 +122,18 @@ def run_full_inference_on_dataset(
         seq_name = gt_f.name.replace("_bb_windows_40ms.txt", "")
         split = "train" if "Training" in str(gt_f) else "test"
 
+        if sequences is not None and seq_name not in sequences:
+            continue
+
+        if split_filter != "all" and split != split_filter:
+            continue
+
         if "EVK4" in seq_name.upper():
             sensor = "EVK4"
         elif "DVX" in seq_name.upper():
             sensor = "DVX"
         else:
             sensor = "DAVIS"
-
-        npy_matches = list(gt_f.parent.glob(f"{seq_name}_labeled_events.npy"))
-        if not npy_matches:
-            npy_matches = list(dataset_dir.rglob(f"{seq_name}_labeled_events.npy"))
-
-        if not npy_matches:
-            print(f"[WARN] Skipping {seq_name}: labeled events npy not found.", file=sys.stderr)
-            continue
-
-        npy_f = npy_matches[0]
-        events = load_events(npy_f)
-        width, height = infer_resolution(seq_name, events[:, 0], events[:, 1])
 
         gt_rows: List[Tuple[int, int, int, int, int, int]] = []
         with open(gt_f, "r", encoding="utf-8") as f:
@@ -131,34 +150,33 @@ def run_full_inference_on_dataset(
                     )
                 )
 
-        start_t = time.perf_counter()
-        window_boxes: List[Tuple[int, int, List[Dict[str, float]]]] = []
+        ms_per_win = 0.0
 
-        for w_start, w_end, w_events in iter_windows(events, window_us=WINDOW_US):
-            count_img, _, _ = event_image(w_events, width, height)
-            boxes = detect_boxes(count_img, width, height, cfg)
-            window_boxes.append((w_start, w_end, boxes))
+        if recompute:
+            npy_matches = list(gt_f.parent.glob(f"{seq_name}_labeled_events.npy"))
+            if not npy_matches:
+                npy_matches = list(dataset_dir.rglob(f"{seq_name}_labeled_events.npy"))
+            if not npy_matches:
+                print(f"[WARN] Skipping {seq_name}: labeled events npy not found.", file=sys.stderr)
+                continue
 
-        total_windows = len(window_boxes)
-        elapsed_ms = (time.perf_counter() - start_t) * 1000.0
-        ms_per_win = elapsed_ms / total_windows if total_windows > 0 else 0.0
+            npy_f = npy_matches[0]
+            events = load_events(npy_f)
+            width, height = infer_resolution(seq_name, events[:, 0], events[:, 1])
 
-        pred_rows: List[Tuple[int, int, int, int, int, int, float]] = []
-
-        for w_start, w_end, boxes in window_boxes:
-            for b in boxes:
-                conf = float(b.get("confidence", b.get("density", 0.01)))
-                pred_rows.append(
-                    (
-                        w_start,
-                        w_end,
-                        int(round(b["center_x"])),
-                        int(round(b["center_y"])),
-                        int(round(b["width"])),
-                        int(round(b["height"])),
-                        conf,
-                    )
-                )
+            start_t = time.perf_counter()
+            pred_rows, num_windows = run_sequence(
+                events, width, height, cfg, window_us=WINDOW_US, max_windows=max_windows
+            )
+            elapsed_ms = (time.perf_counter() - start_t) * 1000.0
+            ms_per_win = elapsed_ms / num_windows if num_windows > 0 else 0.0
+        else:
+            pred_file = pred_dir / f"{seq_name}_pred.txt"
+            if not pred_file.exists():
+                print(f"[WARN] Prediction file not found: {pred_file}. Run infer.py first or use --recompute.", file=sys.stderr)
+                pred_rows = []
+            else:
+                pred_rows = load_pred_file(pred_file)
 
         eval_res = evaluate_sequence(gt_rows, pred_rows)
 
@@ -184,8 +202,11 @@ def run_full_inference_on_dataset(
 
 
 def generate_scoreboard_reports(
-    seq_results: List[Dict[str, Any]], cfg_hash: str, tag: str
-) -> Tuple[Dict[str, Any], List[List[Any]]]:
+    seq_results: List[Dict[str, Any]],
+    cfg_hash: str,
+    tag: str,
+    zero_gt_policy: str = "skip",
+) -> Tuple[Dict[str, Any], List[Dict[str, Any]], List[Tuple[str, str]]]:
     """Generate structured metric tables and check zero-prediction assertion guard."""
     tot_gt = sum(r["gt_count"] for r in seq_results)
     tot_pred = sum(r["pred_count"] for r in seq_results)
@@ -194,11 +215,18 @@ def generate_scoreboard_reports(
     tot_fn = sum(r["fn"] for r in seq_results)
 
     valid_aps = [r["ap"] for r in seq_results if not np.isnan(r["ap"])]
-    overall_mAP = float(np.mean(valid_aps)) if valid_aps else 0.0
+    mAP_skip = float(np.mean(valid_aps)) if valid_aps else 0.0
+
+    all_aps_zero = [0.0 if np.isnan(r["ap"]) else r["ap"] for r in seq_results]
+    mAP_zero = float(np.mean(all_aps_zero)) if all_aps_zero else 0.0
+
+    overall_mAP = mAP_skip if zero_gt_policy == "skip" else mAP_zero
     overall_prec, overall_rec, overall_f1 = compute_prf1(tot_tp, tot_fp, tot_fn)
 
     overall_metrics = {
         "mAP": overall_mAP,
+        "mAP_skip": mAP_skip,
+        "mAP_zero": mAP_zero,
         "precision": overall_prec,
         "recall": overall_rec,
         "f1": overall_f1,
@@ -213,7 +241,7 @@ def generate_scoreboard_reports(
         key = (r["sensor"], r["split"])
         sensor_split_counts[key] = sensor_split_counts.get(key, 0) + r["pred_count"]
 
-    zero_prediction_failures = []
+    zero_prediction_failures: List[Tuple[str, str]] = []
     for (sensor, split), count in sensor_split_counts.items():
         if count == 0:
             zero_prediction_failures.append((sensor, split))
@@ -229,6 +257,51 @@ def generate_scoreboard_reports(
     return overall_metrics, seq_results, zero_prediction_failures
 
 
+def log_run_history(
+    history_path: Path,
+    tag: str,
+    cfg_hash: str,
+    split: str,
+    metrics: Dict[str, Any],
+) -> None:
+    """Append structured run summary to run history CSV."""
+    history_path.parent.mkdir(parents=True, exist_ok=True)
+    is_new = not history_path.exists()
+    timestamp_str = datetime.datetime.now().isoformat()
+
+    with open(history_path, "a", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        if is_new:
+            writer.writerow([
+                "timestamp",
+                "tag",
+                "config_hash",
+                "split",
+                "mAP_skip",
+                "mAP_zero",
+                "precision",
+                "recall",
+                "f1",
+                "tp",
+                "fp",
+                "fn",
+            ])
+        writer.writerow([
+            timestamp_str,
+            tag,
+            cfg_hash,
+            split,
+            f"{metrics['mAP_skip']:.6f}",
+            f"{metrics['mAP_zero']:.6f}",
+            f"{metrics['precision']:.6f}",
+            f"{metrics['recall']:.6f}",
+            f"{metrics['f1']:.6f}",
+            metrics["tp"],
+            metrics["fp"],
+            metrics["fn"],
+        ])
+
+
 def main() -> None:
     """Main CLI entrypoint for authoritative scoreboard."""
     parser = argparse.ArgumentParser(
@@ -238,7 +311,7 @@ def main() -> None:
         "--pred-dir",
         type=str,
         default="predictions",
-        help="Path to predictions directory",
+        help="Path to predictions directory containing _pred.txt files",
     )
     parser.add_argument(
         "--dataset-dir",
@@ -248,6 +321,25 @@ def main() -> None:
     )
     parser.add_argument(
         "--config", type=str, default="config.yaml", help="Path to config file"
+    )
+    parser.add_argument(
+        "--split",
+        type=str,
+        default="train",
+        choices=["train", "test", "all"],
+        help="Dataset split to score (default: train)",
+    )
+    parser.add_argument(
+        "--zero-gt-policy",
+        type=str,
+        default="skip",
+        choices=["skip", "zero"],
+        help="Policy for sequences with 0 GT boxes (skip: ignore nan, zero: score as 0.0)",
+    )
+    parser.add_argument(
+        "--recompute",
+        action="store_true",
+        help="Recompute predictions in-process instead of reading from --pred-dir",
     )
     parser.add_argument(
         "--out",
@@ -271,21 +363,26 @@ def main() -> None:
     cfg = load_yaml_config(cfg_path)
     cfg_hash = compute_config_hash(cfg_path)
     dataset_dir = Path(args.dataset_dir).resolve()
+    pred_dir = Path(args.pred_dir).resolve()
 
     print(f"\n================================================================================")
-    print(f"  AUTHORITATIVE SCOREBOARD — TAG: {args.tag} (Config Hash: {cfg_hash})")
+    print(f"  AUTHORITATIVE SCOREBOARD — TAG: {args.tag} (Split: {args.split.upper()}, Config Hash: {cfg_hash})")
     print(f"================================================================================")
 
-    # Print effective configuration per sensor
     print_effective_config(cfg)
 
-    seq_results = run_full_inference_on_dataset(dataset_dir, cfg)
-    overall_metrics, seq_results, zero_failures = generate_scoreboard_reports(seq_results, cfg_hash, args.tag)
+    seq_results = evaluate_dataset_sequences(
+        dataset_dir, pred_dir, cfg, split_filter=args.split, recompute=args.recompute
+    )
+    overall_metrics, seq_results, zero_failures = generate_scoreboard_reports(
+        seq_results, cfg_hash, args.tag, zero_gt_policy=args.zero_gt_policy
+    )
 
-    print("\nOVERALL METRICS (Across All 21 Sequences):")
+    print(f"\nOVERALL METRICS ({args.split.upper()} Split — {len(seq_results)} Sequences):")
     overall_table = [
         [
-            f"{overall_metrics['mAP']:.6f}",
+            f"{overall_metrics['mAP_skip']:.6f}",
+            f"{overall_metrics['mAP_zero']:.6f}",
             f"{overall_metrics['precision']:.6f}",
             f"{overall_metrics['recall']:.6f}",
             f"{overall_metrics['f1']:.6f}",
@@ -297,7 +394,32 @@ def main() -> None:
     print(
         tabulate(
             overall_table,
-            headers=["mAP@0.5", "Precision", "Recall", "F1", "TP", "FP", "FN"],
+            headers=["mAP (Skip Zero-GT)", "mAP (Zero-GT as 0.0)", "Precision", "Recall", "F1", "TP", "FP", "FN"],
+            tablefmt="github",
+        )
+    )
+
+    # Per-sequence breakdown table
+    breakdown_table = [
+        [
+            r["sequence"],
+            r["sensor"],
+            r["split"],
+            r["gt_count"],
+            r["pred_count"],
+            f"{r['precision']:.4f}",
+            f"{r['recall']:.4f}",
+            f"{r['f1']:.4f}",
+            f"{r['ap']:.4f}" if not np.isnan(r["ap"]) else "nan (0 GT)",
+            f"{r['ms_per_window']:.2f}" if args.recompute else "N/A",
+        ]
+        for r in seq_results
+    ]
+    print("\nPER-SEQUENCE BREAKDOWN:")
+    print(
+        tabulate(
+            breakdown_table,
+            headers=["Sequence", "Sensor", "Split", "GT", "Preds", "Precision", "Recall", "F1", "AP@0.5", "ms/win"],
             tablefmt="github",
         )
     )
@@ -318,11 +440,17 @@ def main() -> None:
                 f"{r['precision']:.6f}",
                 f"{r['recall']:.6f}",
                 f"{r['f1']:.6f}",
-                f"{r['ap']:.6f}",
+                f"{r['ap']:.6f}" if not np.isnan(r["ap"]) else "nan",
                 f"{r['ms_per_window']:.2f}",
             ])
 
     print(f"\n[INFO] Scoreboard CSV saved to: {out_path}")
+
+    # Log run history
+    if args.history:
+        history_path = Path(args.history)
+        log_run_history(history_path, args.tag, cfg_hash, args.split, overall_metrics)
+        print(f"[INFO] Run logged to history: {history_path}")
 
     if zero_failures:
         print(f"\n[ERROR] Exiting with code 1 due to zero predictions on sensors: {zero_failures}")

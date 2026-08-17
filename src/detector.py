@@ -1,6 +1,6 @@
-"""Object detector implementation for event count maps with component splitting, extent box mode, NMS, and resolved per-sensor configs."""
+"""Object detector implementation for event count maps with component splitting, extent box mode, and configurable NMS."""
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 import cv2
 import numpy as np
 
@@ -20,7 +20,7 @@ def detect_boxes(
         cfg: Configuration parameters dictionary.
 
     Returns:
-        List of detection dictionaries with box properties.
+        List of detection dictionaries with box properties (all surviving components).
     """
     nonzero_vals = count_img[count_img > 0]
     num_nonzero = len(nonzero_vals)
@@ -67,6 +67,8 @@ def detect_boxes(
         if cv2.countNonZero(binary) < 4:
             return []
 
+    b_predilate = binary.copy()
+
     dilate_k = int(eff.get("dilate_kernel", 3))
     if dilate_k > 1:
         kernel_dilate = cv2.getStructuringElement(cv2.MORPH_RECT, (dilate_k, dilate_k))
@@ -84,6 +86,7 @@ def detect_boxes(
 
     box_mode = str(eff.get("box_mode", "scale")).lower()
     centroid_mode = str(eff.get("centroid_mode", "component")).lower()
+    centroid_on_predilate = bool(eff.get("centroid_on_predilation_mask", False))
 
     box_scale = float(eff.get("box_scale", def_scale))
     box_pad = float(eff.get("box_pad", def_pad))
@@ -95,14 +98,8 @@ def detect_boxes(
     extent_scale = float(eff.get("extent_scale", 1.0))
     extent_pad = float(eff.get("extent_pad", 2.0))
 
+    nms_stage = str(eff.get("nms_stage", "pipeline")).lower()
     nms_iou_val = eff.get("nms_iou", 0.3)
-    conf_min_val = float(eff.get("conf_min", 0.0))
-    max_cand_val = eff.get("max_candidates_per_window", None)
-    if max_cand_val is not None:
-        try:
-            max_cand_val = int(max_cand_val)
-        except (TypeError, ValueError):
-            max_cand_val = None
 
     # Component list after component splitting
     final_components: List[Tuple[float, float, float, float, int]] = []
@@ -162,10 +159,28 @@ def detect_boxes(
         center_comp_y = y_box + h_box / 2.0
 
         if centroid_mode == "weighted" and comp_events > 0 and sub_mask.any():
-            ys, xs = np.where(sub_mask)
-            weights = sub_img[sub_mask]
-            center_x = x_box + float((xs * weights).sum() / comp_events)
-            center_y = y_box + float((ys * weights).sum() / comp_events)
+            if centroid_on_predilate:
+                sub_predil = b_predilate[y_int : y_int + h_int, x_int : x_int + w_int]
+                predil_mask = sub_mask & (sub_predil > 0)
+                if predil_mask.any():
+                    ys, xs = np.where(predil_mask)
+                    weights = sub_img[predil_mask]
+                    w_sum = weights.sum()
+                    if w_sum > 0:
+                        center_x = x_box + float((xs * weights).sum() / w_sum)
+                        center_y = y_box + float((ys * weights).sum() / w_sum)
+                    else:
+                        center_x, center_y = center_comp_x, center_comp_y
+                else:
+                    ys, xs = np.where(sub_mask)
+                    weights = sub_img[sub_mask]
+                    center_x = x_box + float((xs * weights).sum() / comp_events)
+                    center_y = y_box + float((ys * weights).sum() / comp_events)
+            else:
+                ys, xs = np.where(sub_mask)
+                weights = sub_img[sub_mask]
+                center_x = x_box + float((xs * weights).sum() / comp_events)
+                center_y = y_box + float((ys * weights).sum() / comp_events)
         else:
             center_x = center_comp_x
             center_y = center_comp_y
@@ -204,9 +219,6 @@ def detect_boxes(
 
         conf = min(1.0, max(0.01, density * 1.5))
 
-        if conf < conf_min_val:
-            continue
-
         results.append(
             {
                 "center_x": clamped_cx,
@@ -221,17 +233,12 @@ def detect_boxes(
             }
         )
 
-    # Apply NMS
-    if nms_iou_val is not None:
+    # Optional detector-stage NMS
+    if nms_stage == "detector" and nms_iou_val is not None:
         try:
             nms_thresh = float(nms_iou_val)
             results = apply_nms(results, nms_thresh)
         except (TypeError, ValueError):
             pass
-
-    # Top-K candidate filtering per window
-    if max_cand_val is not None and max_cand_val > 0 and len(results) > max_cand_val:
-        results.sort(key=lambda b: b["confidence"], reverse=True)
-        results = results[:max_cand_val]
 
     return results
