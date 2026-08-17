@@ -107,75 +107,84 @@ def run_dvx_box_mode_evaluation(
         {"name": "extent_s1.5_p4.0", "box_mode": "extent", "extent_scale": 1.5, "extent_pad": 4.0, "min_dim": 8.0, "max_dim": 50.0},
     ]
 
-    # Pre-extract sequences and run sequence evaluations
-    results: List[Dict[str, Any]] = []
+    results_by_cand: Dict[str, Dict[str, Any]] = {
+        cand["name"]: {
+            "config_name": cand["name"],
+            "box_mode": cand["box_mode"],
+            "tp": 0,
+            "fp": 0,
+            "fn": 0,
+            "preds_emitted": 0,
+            "aps": [],
+        }
+        for cand in candidates
+    }
 
-    for cand in candidates:
-        test_cfg = deepcopy(base_cfg)
-        if "DVX" not in test_cfg:
-            test_cfg["DVX"] = {}
+    for gt_f in dvx_train_files:
+        seq_name = gt_f.name.replace("_bb_windows_40ms.txt", "")
+        npy_matches = list(gt_f.parent.glob(f"{seq_name}_labeled_events.npy"))
+        if not npy_matches:
+            npy_matches = list(dataset_dir.rglob(f"{seq_name}_labeled_events.npy"))
+        if not npy_matches:
+            continue
 
-        test_cfg["DVX"]["open_kernel"] = 1
-        test_cfg["DVX"]["percentile"] = 85.0
-        test_cfg["DVX"]["box_mode"] = cand["box_mode"]
-        if cand["box_mode"] == "fixed":
-            test_cfg["DVX"]["box_w"] = cand["box_w"]
-            test_cfg["DVX"]["box_h"] = cand["box_h"]
-        else:
-            test_cfg["DVX"]["extent_scale"] = cand["extent_scale"]
-            test_cfg["DVX"]["extent_pad"] = cand["extent_pad"]
-            test_cfg["DVX"]["min_dim"] = cand["min_dim"]
-            test_cfg["DVX"]["max_dim"] = cand["max_dim"]
+        events = load_events(npy_matches[0])
+        width, height = infer_resolution(seq_name, events[:, 0], events[:, 1])
 
-        tot_tp, tot_fp, tot_fn = 0, 0, 0
-        tot_pred = 0
-        all_aps: List[float] = []
-
-        for gt_f in dvx_train_files:
-            seq_name = gt_f.name.replace("_bb_windows_40ms.txt", "")
-            npy_matches = list(gt_f.parent.glob(f"{seq_name}_labeled_events.npy"))
-            if not npy_matches:
-                npy_matches = list(dataset_dir.rglob(f"{seq_name}_labeled_events.npy"))
-            if not npy_matches:
-                continue
-
-            events = load_events(npy_matches[0])
-            width, height = infer_resolution(seq_name, events[:, 0], events[:, 1])
-
-            gt_rows = []
-            with open(gt_f, "r", encoding="utf-8") as f:
-                rdr = csv.DictReader(f, delimiter="\t")
-                for r in rdr:
-                    gt_rows.append(
-                        (
-                            int(r["window_start_timestamp_us"]),
-                            int(r["window_end_timestamp_us"]),
-                            int(r["center_x"]),
-                            int(r["center_y"]),
-                            int(r["width"]),
-                            int(r["height"]),
-                        )
+        gt_rows: List[Tuple[int, int, int, int, int, int]] = []
+        with open(gt_f, "r", encoding="utf-8") as f:
+            rdr = csv.DictReader(f, delimiter="\t")
+            for r in rdr:
+                gt_rows.append(
+                    (
+                        int(r["window_start_timestamp_us"]),
+                        int(r["window_end_timestamp_us"]),
+                        int(r["center_x"]),
+                        int(r["center_y"]),
+                        int(r["width"]),
+                        int(r["height"]),
                     )
+                )
+
+        for cand in candidates:
+            test_cfg = deepcopy(base_cfg)
+            if "DVX" not in test_cfg:
+                test_cfg["DVX"] = {}
+            test_cfg["DVX"]["open_kernel"] = 1
+            test_cfg["DVX"]["percentile"] = 85.0
+            test_cfg["DVX"]["box_mode"] = cand["box_mode"]
+            if cand["box_mode"] == "fixed":
+                test_cfg["DVX"]["box_w"] = cand["box_w"]
+                test_cfg["DVX"]["box_h"] = cand["box_h"]
+            else:
+                test_cfg["DVX"]["extent_scale"] = cand["extent_scale"]
+                test_cfg["DVX"]["extent_pad"] = cand["extent_pad"]
+                test_cfg["DVX"]["min_dim"] = cand["min_dim"]
+                test_cfg["DVX"]["max_dim"] = cand["max_dim"]
 
             preds, _ = run_sequence(events, width, height, test_cfg)
-            tot_pred += len(preds)
             eval_res = evaluate_sequence(gt_rows, preds)
-            tot_tp += eval_res["tp"]
-            tot_fp += eval_res["fp"]
-            tot_fn += eval_res["fn"]
+
+            c_entry = results_by_cand[cand["name"]]
+            c_entry["preds_emitted"] += len(preds)
+            c_entry["tp"] += eval_res["tp"]
+            c_entry["fp"] += eval_res["fp"]
+            c_entry["fn"] += eval_res["fn"]
             if not np.isnan(eval_res["ap"]):
-                all_aps.append(eval_res["ap"])
+                c_entry["aps"].append(eval_res["ap"])
 
-        prec, rec, f1 = compute_prf1(tot_tp, tot_fp, tot_fn)
-        mAP = float(np.mean(all_aps)) if all_aps else 0.0
-
+    results: List[Dict[str, Any]] = []
+    for cand in candidates:
+        c_entry = results_by_cand[cand["name"]]
+        prec, rec, f1 = compute_prf1(c_entry["tp"], c_entry["fp"], c_entry["fn"])
+        mAP = float(np.mean(c_entry["aps"])) if c_entry["aps"] else 0.0
         results.append(
             {
                 "config_name": cand["name"],
                 "box_mode": cand["box_mode"],
-                "preds_emitted": tot_pred,
-                "tp": tot_tp,
-                "fp": tot_fp,
+                "preds_emitted": c_entry["preds_emitted"],
+                "tp": c_entry["tp"],
+                "fp": c_entry["fp"],
                 "precision": prec,
                 "recall": rec,
                 "f1": f1,
