@@ -1,4 +1,4 @@
-"""Theoretical box geometry ceiling diagnostic and box mode sweep suite."""
+"""Theoretical box geometry ceiling diagnostic and fast cached box mode sweep suite."""
 
 import argparse
 import csv
@@ -6,13 +6,19 @@ from copy import deepcopy
 import math
 from pathlib import Path
 import sys
+import time
 from typing import Any, Dict, List, Tuple
+import cv2
 import numpy as np
 from tabulate import tabulate
 
-from src.common import infer_resolution, load_events
+from src.common import WINDOW_US, event_image, infer_resolution, iter_windows, load_events
+from src.detector import detect_boxes
 from src.metrics import compute_prf1, evaluate_sequence, iou
-from src.pipeline import run_sequence
+from src.nms import apply_nms
+from src.pipeline import compute_confidence, run_sequence
+
+
 def load_all_gt_boxes(dataset_dir: Path, split: str = "train") -> Dict[str, List[Tuple[float, float]]]:
     """Load all GT box dimensions (width, height) grouped by sensor family."""
     gt_files = sorted(list(dataset_dir.rglob("*_bb_windows_40ms.txt")))
@@ -79,7 +85,7 @@ def compute_geometric_ceiling(
 def run_dvx_box_mode_evaluation(
     dataset_dir: Path, base_cfg: Dict[str, Any]
 ) -> List[Dict[str, Any]]:
-    """Run full evaluation on 8 DVX training sequences across candidate box modes."""
+    """Run fast cached evaluation on 8 DVX training sequences across candidate box modes."""
     gt_files = sorted(list(dataset_dir.rglob("*_bb_windows_40ms.txt")))
     dvx_train_files = [f for f in gt_files if "DVX" in f.name.upper() and "Training" in str(f)]
 
@@ -101,6 +107,7 @@ def run_dvx_box_mode_evaluation(
         {"name": "extent_s1.5_p4.0", "box_mode": "extent", "extent_scale": 1.5, "extent_pad": 4.0, "min_dim": 8.0, "max_dim": 50.0},
     ]
 
+    # Pre-extract sequences and run sequence evaluations
     results: List[Dict[str, Any]] = []
 
     for cand in candidates:
