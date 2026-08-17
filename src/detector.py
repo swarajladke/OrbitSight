@@ -67,6 +67,8 @@ def detect_boxes(
         if cv2.countNonZero(binary) < 4:
             return []
 
+    b_predilate = binary.copy()
+
     dilate_k = int(eff.get("dilate_kernel", 3))
     if dilate_k > 1:
         kernel_dilate = cv2.getStructuringElement(cv2.MORPH_RECT, (dilate_k, dilate_k))
@@ -84,6 +86,7 @@ def detect_boxes(
 
     box_mode = str(eff.get("box_mode", "scale")).lower()
     centroid_mode = str(eff.get("centroid_mode", "component")).lower()
+    centroid_on_predilate = bool(eff.get("centroid_on_predilation_mask", False))
 
     box_scale = float(eff.get("box_scale", def_scale))
     box_pad = float(eff.get("box_pad", def_pad))
@@ -162,10 +165,28 @@ def detect_boxes(
         center_comp_y = y_box + h_box / 2.0
 
         if centroid_mode == "weighted" and comp_events > 0 and sub_mask.any():
-            ys, xs = np.where(sub_mask)
-            weights = sub_img[sub_mask]
-            center_x = x_box + float((xs * weights).sum() / comp_events)
-            center_y = y_box + float((ys * weights).sum() / comp_events)
+            if centroid_on_predilate:
+                sub_predil = b_predilate[y_int : y_int + h_int, x_int : x_int + w_int]
+                predil_mask = sub_mask & (sub_predil > 0)
+                if predil_mask.any():
+                    ys, xs = np.where(predil_mask)
+                    weights = sub_img[predil_mask]
+                    w_sum = weights.sum()
+                    if w_sum > 0:
+                        center_x = x_box + float((xs * weights).sum() / w_sum)
+                        center_y = y_box + float((ys * weights).sum() / w_sum)
+                    else:
+                        center_x, center_y = center_comp_x, center_comp_y
+                else:
+                    ys, xs = np.where(sub_mask)
+                    weights = sub_img[sub_mask]
+                    center_x = x_box + float((xs * weights).sum() / comp_events)
+                    center_y = y_box + float((ys * weights).sum() / comp_events)
+            else:
+                ys, xs = np.where(sub_mask)
+                weights = sub_img[sub_mask]
+                center_x = x_box + float((xs * weights).sum() / comp_events)
+                center_y = y_box + float((ys * weights).sum() / comp_events)
         else:
             center_x = center_comp_x
             center_y = center_comp_y

@@ -10,13 +10,11 @@ import numpy as np
 
 from src.common import (
     WINDOW_US,
-    event_image,
     infer_resolution,
-    iter_windows,
     load_events,
     sequence_name_from_npy,
 )
-from src.detector import detect_boxes
+from src.pipeline import compute_confidence, run_sequence
 
 
 def _parse_yaml_value(val_str: str) -> Any:
@@ -81,44 +79,13 @@ def load_config(config_path: Path) -> Dict[str, Any]:
         return cfg
 
 
-def compute_confidence(
-    box: Dict[str, float],
-    hits: int,
-    cfg: Dict[str, Any],
-) -> float:
-    """Compute deterministic weighted confidence score clipped to [0.01, 1.0]."""
-    weights = cfg.get(
-        "confidence_weights",
-        {"density": 0.25, "events": 0.35, "compactness": 0.20, "persistence": 0.20},
-    )
-    w_den = float(weights.get("density", 0.25))
-    w_evt = float(weights.get("events", 0.35))
-    w_cmp = float(weights.get("compactness", 0.20))
-    w_per = float(weights.get("persistence", 0.20))
-
-    sub_density = min(1.0, box["density"])
-    min_evt = float(cfg.get("min_events_in_box", 3))
-    sub_events = min(1.0, box["events"] / (min_evt * 5.0))
-    sub_compactness = 1.0 / (1.0 + abs(box["aspect"] - 1.0))
-    sub_persistence = min(1.0, hits / 3.0)
-
-    score = (
-        w_den * sub_density
-        + w_evt * sub_events
-        + w_cmp * sub_compactness
-        + w_per * sub_persistence
-    )
-
-    return float(np.clip(score, 0.01, 1.0))
-
-
 def process_sequence(
     npy_path: Path,
     output_dir: Path,
     cfg: Dict[str, Any],
     max_windows: float = float("inf"),
 ) -> Tuple[float, int]:
-    """Process single event sequence file, execute detection, apply persistence filter, write predictions."""
+    """Process single event sequence file via unified pipeline, write predictions."""
     seq_name = sequence_name_from_npy(npy_path)
     file_mb = npy_path.stat().st_size / (1024 * 1024)
     events = load_events(npy_path)
@@ -132,74 +99,19 @@ def process_sequence(
     width, height = infer_resolution(seq_name, events[:, 0], events[:, 1])
     window_us = int(cfg.get("window_us", WINDOW_US))
 
-    window_records: List[Tuple[int, int, List[Dict[str, float]]]] = []
-    window_count = 0
+    predictions = run_sequence(
+        events, width, height, cfg, window_us=window_us, max_windows=max_windows
+    )
 
-    for w_start, w_end, w_events in iter_windows(events, window_us=window_us):
-        count_img, _, _ = event_image(w_events, width, height)
-        boxes = detect_boxes(count_img, width, height, cfg)
-        window_records.append((w_start, w_end, boxes))
-        window_count += 1
-        if window_count >= max_windows:
-            break
-
-    num_windows = len(window_records)
-    min_hits = int(cfg.get("min_hits", 1))
-    max_dist_frac = float(cfg.get("max_dist_frac", 0.08))
-    diagonal = math.hypot(width, height)
-    max_dist = max_dist_frac * diagonal
+    total_time_us = int(events[-1, 2] - events[0, 2]) if len(events) > 1 else 0
+    num_windows = max(1, total_time_us // window_us)
 
     output_lines: List[str] = [
         "window_start_timestamp_us\twindow_end_timestamp_us\tcenter_x\tcenter_y\twidth\theight\tconfidence"
     ]
 
-    for w_idx in range(num_windows):
-        w_start, w_end, boxes = window_records[w_idx]
-        if not boxes:
-            continue
-
-        prev_boxes = window_records[w_idx - 1][2] if w_idx > 0 else []
-        next_boxes = (
-            window_records[w_idx + 1][2] if w_idx < num_windows - 1 else []
-        )
-
-        for box in boxes:
-            hits = 1
-            has_prev = any(
-                math.hypot(
-                    box["center_x"] - p["center_x"],
-                    box["center_y"] - p["center_y"],
-                )
-                <= max_dist
-                for p in prev_boxes
-            )
-            if has_prev:
-                hits += 1
-
-            has_next = any(
-                math.hypot(
-                    box["center_x"] - n["center_x"],
-                    box["center_y"] - n["center_y"],
-                )
-                <= max_dist
-                for n in next_boxes
-            )
-            if has_next:
-                hits += 1
-
-            if min_hits >= 2 and hits < min_hits:
-                continue
-
-            conf = compute_confidence(box, hits, cfg)
-
-            cx = int(round(box["center_x"]))
-            cy = int(round(box["center_y"]))
-            bw = int(round(box["width"]))
-            bh = int(round(box["height"]))
-
-            output_lines.append(
-                f"{w_start}\t{w_end}\t{cx}\t{cy}\t{bw}\t{bh}\t{conf:.4f}"
-            )
+    for ws, we, cx, cy, bw, bh, conf in predictions:
+        output_lines.append(f"{ws}\t{we}\t{cx}\t{cy}\t{bw}\t{bh}\t{conf:.4f}")
 
     output_path = output_dir / f"{seq_name}_pred.txt"
     with open(output_path, "w", encoding="utf-8") as f:

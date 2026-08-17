@@ -12,16 +12,14 @@ from tabulate import tabulate
 
 from src.common import (
     WINDOW_US,
-    event_image,
     infer_resolution,
-    iter_windows,
     load_events,
     print_effective_config,
     resolve_effective_config,
     sequence_name_from_npy,
 )
-from src.detector import detect_boxes
 from src.metrics import compute_ap, compute_prf1, evaluate_sequence
+from src.pipeline import run_sequence
 
 
 def load_yaml_config(path: Path) -> Dict[str, Any]:
@@ -132,33 +130,12 @@ def run_full_inference_on_dataset(
                 )
 
         start_t = time.perf_counter()
-        window_boxes: List[Tuple[int, int, List[Dict[str, float]]]] = []
-
-        for w_start, w_end, w_events in iter_windows(events, window_us=WINDOW_US):
-            count_img, _, _ = event_image(w_events, width, height)
-            boxes = detect_boxes(count_img, width, height, cfg)
-            window_boxes.append((w_start, w_end, boxes))
-
-        total_windows = len(window_boxes)
+        pred_rows = run_sequence(events, width, height, cfg, window_us=WINDOW_US)
         elapsed_ms = (time.perf_counter() - start_t) * 1000.0
+
+        total_time_us = int(events[-1, 2] - events[0, 2]) if len(events) > 1 else 0
+        total_windows = max(1, total_time_us // WINDOW_US)
         ms_per_win = elapsed_ms / total_windows if total_windows > 0 else 0.0
-
-        pred_rows: List[Tuple[int, int, int, int, int, int, float]] = []
-
-        for w_start, w_end, boxes in window_boxes:
-            for b in boxes:
-                conf = float(b.get("confidence", b.get("density", 0.01)))
-                pred_rows.append(
-                    (
-                        w_start,
-                        w_end,
-                        int(round(b["center_x"])),
-                        int(round(b["center_y"])),
-                        int(round(b["width"])),
-                        int(round(b["height"])),
-                        conf,
-                    )
-                )
 
         eval_res = evaluate_sequence(gt_rows, pred_rows)
 
