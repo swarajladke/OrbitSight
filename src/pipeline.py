@@ -1,9 +1,18 @@
-"""Unified end-to-end inference and evaluation pipeline for OrbitSight."""
+"""Unified end-to-end inference and evaluation pipeline for OrbitSight.
+
+Execution Order per Window:
+1. Windowing (`iter_windows`) & Count Map Generation (`event_image`)
+2. Component Detection (`detect_boxes` returning full untruncated component lists)
+3. Neighborhood Persistence Matching against full untruncated neighbor windows (`min_hits`)
+4. Deterministic Multi-term Weighted Confidence Scoring (`compute_confidence`)
+5. Pipeline-stage NMS on weighted confidence (`apply_nms` if `nms_stage == 'pipeline'`)
+6. Confidence Threshold Gating (`conf_min`)
+7. Top-K Window Candidate Truncation (`max_candidates_per_window`)
+8. Coordinate & Confidence Rounding
+"""
 
 import math
-from pathlib import Path
-import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Tuple
 import numpy as np
 
 from src.common import (
@@ -13,6 +22,7 @@ from src.common import (
     resolve_effective_config,
 )
 from src.detector import detect_boxes
+from src.nms import apply_nms
 
 
 def compute_confidence(
@@ -53,14 +63,11 @@ def run_sequence(
     cfg: Dict[str, Any],
     window_us: int = WINDOW_US,
     max_windows: float = float("inf"),
-) -> List[Tuple[int, int, int, int, int, int, float]]:
+) -> Tuple[List[Tuple[int, int, int, int, int, int, float]], int]:
     """Run full unified detection pipeline on event stream.
 
-    Encapsulates: windowing -> event_image -> detect_boxes -> persistence/min_hits gate
-    -> compute_confidence -> conf_min filter -> max_candidates_per_window Top-K -> rounding.
-
     Args:
-        events: NumPy array of events [x, y, t, p, (label)].
+        events: NumPy array of events [x, y, p, t, (label)].
         width: Sensor width in pixels.
         height: Sensor height in pixels.
         cfg: Configuration dictionary.
@@ -68,7 +75,8 @@ def run_sequence(
         max_windows: Maximum windows to process (for testing/smoke tests).
 
     Returns:
-        List of prediction tuples: (w_start, w_end, center_x, center_y, width, height, confidence).
+        Tuple of (prediction_rows, num_windows_processed).
+        Each prediction row: (w_start, w_end, center_x, center_y, width, height, confidence).
     """
     if width >= 1200:
         sensor_name = "EVK4"
@@ -94,6 +102,9 @@ def run_sequence(
     min_hits = int(eff.get("min_hits", 1))
     max_dist_frac = float(eff.get("max_dist_frac", 0.08))
     conf_min = float(eff.get("conf_min", 0.0))
+    nms_stage = str(eff.get("nms_stage", "pipeline")).lower()
+    nms_iou_val = eff.get("nms_iou", 0.3)
+
     max_k_val = eff.get("max_candidates_per_window", None)
     if max_k_val is not None:
         try:
@@ -118,8 +129,9 @@ def run_sequence(
             window_records[w_idx + 1][2] if w_idx < num_windows - 1 else []
         )
 
-        window_cands: List[Tuple[int, int, int, int, int, int, float]] = []
+        scored_cands: List[Dict[str, float]] = []
 
+        # 1. Persistence matching on full untruncated neighbor lists & weighted scoring
         for box in boxes:
             hits = 1
             has_prev = any(
@@ -148,22 +160,40 @@ def run_sequence(
                 continue
 
             conf = compute_confidence(box, hits, eff)
+            box_copy = dict(box)
+            box_copy["confidence"] = conf
+            scored_cands.append(box_copy)
 
-            if conf < conf_min:
-                continue
+        if not scored_cands:
+            continue
 
-            cx = int(round(box["center_x"]))
-            cy = int(round(box["center_y"]))
-            bw = int(round(box["width"]))
-            bh = int(round(box["height"]))
-            conf_rounded = round(conf, 4)
+        # 2. Pipeline-stage NMS using weighted confidence score
+        if nms_stage == "pipeline" and nms_iou_val is not None:
+            try:
+                nms_thresh = float(nms_iou_val)
+                scored_cands = apply_nms(scored_cands, nms_thresh)
+            except (TypeError, ValueError):
+                pass
 
-            window_cands.append((w_start, w_end, cx, cy, bw, bh, conf_rounded))
+        # 3. Confidence threshold filtering
+        if conf_min > 0.0:
+            scored_cands = [b for b in scored_cands if b["confidence"] >= conf_min]
 
-        if max_k is not None and max_k > 0 and len(window_cands) > max_k:
-            window_cands.sort(key=lambda r: r[6], reverse=True)
-            window_cands = window_cands[:max_k]
+        if not scored_cands:
+            continue
 
-        predictions.extend(window_cands)
+        # 4. Top-K window candidate truncation
+        if max_k is not None and max_k > 0 and len(scored_cands) > max_k:
+            scored_cands.sort(key=lambda b: b["confidence"], reverse=True)
+            scored_cands = scored_cands[:max_k]
 
-    return predictions
+        # 5. Output coordinate and confidence rounding
+        for b in scored_cands:
+            cx = int(round(b["center_x"]))
+            cy = int(round(b["center_y"]))
+            bw = int(round(b["width"]))
+            bh = int(round(b["height"]))
+            conf_rounded = round(float(b["confidence"]), 4)
+            predictions.append((w_start, w_end, cx, cy, bw, bh, conf_rounded))
+
+    return predictions, num_windows

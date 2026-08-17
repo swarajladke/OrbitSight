@@ -99,12 +99,9 @@ def process_sequence(
     width, height = infer_resolution(seq_name, events[:, 0], events[:, 1])
     window_us = int(cfg.get("window_us", WINDOW_US))
 
-    predictions = run_sequence(
+    predictions, num_windows = run_sequence(
         events, width, height, cfg, window_us=window_us, max_windows=max_windows
     )
-
-    total_time_us = int(events[-1, 2] - events[0, 2]) if len(events) > 1 else 0
-    num_windows = max(1, total_time_us // window_us)
 
     output_lines: List[str] = [
         "window_start_timestamp_us\twindow_end_timestamp_us\tcenter_x\tcenter_y\twidth\theight\tconfidence"

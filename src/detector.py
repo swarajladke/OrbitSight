@@ -1,6 +1,6 @@
-"""Object detector implementation for event count maps with component splitting, extent box mode, NMS, and resolved per-sensor configs."""
+"""Object detector implementation for event count maps with component splitting, extent box mode, and configurable NMS."""
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 import cv2
 import numpy as np
 
@@ -20,7 +20,7 @@ def detect_boxes(
         cfg: Configuration parameters dictionary.
 
     Returns:
-        List of detection dictionaries with box properties.
+        List of detection dictionaries with box properties (all surviving components).
     """
     nonzero_vals = count_img[count_img > 0]
     num_nonzero = len(nonzero_vals)
@@ -98,14 +98,8 @@ def detect_boxes(
     extent_scale = float(eff.get("extent_scale", 1.0))
     extent_pad = float(eff.get("extent_pad", 2.0))
 
+    nms_stage = str(eff.get("nms_stage", "pipeline")).lower()
     nms_iou_val = eff.get("nms_iou", 0.3)
-    conf_min_val = float(eff.get("conf_min", 0.0))
-    max_cand_val = eff.get("max_candidates_per_window", None)
-    if max_cand_val is not None:
-        try:
-            max_cand_val = int(max_cand_val)
-        except (TypeError, ValueError):
-            max_cand_val = None
 
     # Component list after component splitting
     final_components: List[Tuple[float, float, float, float, int]] = []
@@ -225,9 +219,6 @@ def detect_boxes(
 
         conf = min(1.0, max(0.01, density * 1.5))
 
-        if conf < conf_min_val:
-            continue
-
         results.append(
             {
                 "center_x": clamped_cx,
@@ -242,17 +233,12 @@ def detect_boxes(
             }
         )
 
-    # Apply NMS
-    if nms_iou_val is not None:
+    # Optional detector-stage NMS
+    if nms_stage == "detector" and nms_iou_val is not None:
         try:
             nms_thresh = float(nms_iou_val)
             results = apply_nms(results, nms_thresh)
         except (TypeError, ValueError):
             pass
-
-    # Top-K candidate filtering per window
-    if max_cand_val is not None and max_cand_val > 0 and len(results) > max_cand_val:
-        results.sort(key=lambda b: b["confidence"], reverse=True)
-        results = results[:max_cand_val]
 
     return results

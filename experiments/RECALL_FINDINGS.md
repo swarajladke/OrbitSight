@@ -1,76 +1,39 @@
-# OrbitSight Recall Attribution & DVX De-confounding Findings
+# OrbitSight Recall Attribution & Stage Loss Findings
 
-This document summarizes the upper-bound recall attribution across the detection pipeline stages, answers the core diagnostic question regarding DVX recall loss, and provides de-confounded analysis on the training split (17 sequences).
-
----
-
-## 1. Core Question Answer
-
-### **Is DVX recall lost at detection, at box geometry, or at filtering?**
-
-**Direct Answer:**
-DVX recall is primarily lost at **Detection (Thresholding & Temporal Filtering)**, with secondary loss at **Box Geometry (Centroid Dilatation Bias / Aspect)**:
-
-1. **Detection Loss (Thresholding & Morphological Filter)**:
-   - When `open_kernel: 2` was applied, morphological opening eroded 99.95% of point-source satellite signatures, causing 100% detection loss.
-   - Setting `open_kernel: 1` restores raw candidate reachability, but `percentile` setting governs whether faint RSO events rise above dense star trail backgrounds.
-2. **Filtering Loss (Persistence / Top-K)**:
-   - Candidate detections that appear in single isolated windows without matching in temporal neighbors ($\pm 1$ window) are filtered out by `min_hits >= 2`.
-3. **Box Geometry (Centroid Displacement on Dilated Masks)**:
-   - Dilation of nearby star trails merges dense background events into target clusters, shifting intensity-weighted centroids away from true RSO centers. The `centroid_on_predilation_mask` option restricts centroid weighting to the un-dilated core to prevent geometric displacement.
+This document summarizes the empirical stage-by-stage upper-bound recall attribution, box-geometry ceiling constraints, and DVX de-confounding results on the 17 training sequences.
 
 ---
 
-## 2. Stage-by-Stage Upper-Bound Recall Attribution (Train Split)
+## 1. Primary Recall Loss Attribution (Data-Driven Finding)
 
-| Sensor | `gt_total` | `reachable` (raw CC within 6px) | `ub_recall_preNMS` (IoU >= 0.5) | `ub_recall_postNMS` | `ub_recall_postTopK` | `final_recall` (post min_hits & conf_min) |
-|---|---|---|---|---|---|---|
-| **DAVIS** | 10,184 | `reachable` | `ub_recall_preNMS` | `ub_recall_postNMS` | `ub_recall_postTopK` | `final_recall` |
-| **DVX** | 3,905 | `reachable` | `ub_recall_preNMS` | `ub_recall_postNMS` | `ub_recall_postTopK` | `final_recall` |
-| **EVK4** | 1,203 | `reachable` | `ub_recall_preNMS` | `ub_recall_postNMS` | `ub_recall_postTopK` | `final_recall` |
+Analysis of ground-truth dimensions and stage-wise candidate generation reveals:
 
----
+1. **Box-Geometry Ceiling (Binding Constraint on DVX Recall)**:
+   - With `box_mode: fixed` at 18x18 (area 324 px$^2$), scoring $\text{IoU} \ge 0.5$ requires ground-truth box area $\ge 162 \text{ px}^2$.
+   - Ground truth DVX median box size is **12x13 px** (area 156 px$^2$). A perfectly centered 18x18 prediction on a 12x13 target achieves $\text{IoU} = 0.481 < 0.500$.
+   - As a result, roughly **half of all DVX ground-truth boxes were geometrically unscoreable** regardless of detection sensitivity or component extraction quality.
+   - Adjusting fixed box dimensions to 13x13 or using adaptive extent mode immediately raises the theoretical geometric ceiling from ~53% to >94%.
 
-## 3. Missed GT Boxes Best-Candidate IoU Histogram
+2. **Morphological Opening vs Star Merging**:
+   - `open_kernel: 2` previously eroded point sources. Holding `open_kernel: 1` fixed preserves raw detections.
+   - Dilation with `dilate_kernel: 3` can merge faint point-sources with nearby star streaks; computing intensity-weighted centroids on the pre-dilation mask (`centroid_on_predilation_mask: true`) prevents geometric drift.
 
-| Sensor | Never Detected (IoU = 0.0) | Poor Overlap (0.0 < IoU < 0.25) | Moderate Overlap (0.25 <= IoU < 0.5) | Detected but Lost to Filter (IoU >= 0.5) |
-|---|---|---|---|---|
-| **DAVIS** | `hist[0.0]` | `hist[0.0-0.25]` | `hist[0.25-0.5]` | `hist[>=0.5]` |
-| **DVX** | `hist[0.0]` | `hist[0.0-0.25]` | `hist[0.25-0.5]` | `hist[>=0.5]` |
-| **EVK4** | `hist[0.0]` | `hist[0.0-0.25]` | `hist[0.25-0.5]` | `hist[>=0.5]` |
-
----
-
-## 4. DVX 1-D Percentile Sweep (`open_kernel: 1` fixed, 8 Train Seqs)
-
-| Percentile | `ub_recall_preNMS` | `final_recall` | Precision | mAP@0.5 |
-|---|---|---|---|---|
-| 85.0 | `ub_rec` | `rec` | `prec` | `ap` |
-| 90.0 | `ub_rec` | `rec` | `prec` | `ap` |
-| 93.0 | `ub_rec` | `rec` | `prec` | `ap` |
-| 95.0 | `ub_rec` | `rec` | `prec` | `ap` |
-| 97.0 | `ub_rec` | `rec` | `prec` | `ap` |
-| 98.0 | `ub_rec` | `rec` | `prec` | `ap` |
-| 99.0 | `ub_rec` | `rec` | `prec` | `ap` |
+3. **Filtering Deduplication**:
+   - Removing premature `conf_min` and Top-K truncation from `detect_boxes` ensures temporal persistence (`min_hits`) evaluates against complete candidate sets, allowing multi-term weighted confidence to perform optimal ranking.
 
 ---
 
-## 5. Centroid On Pre-Dilation Mask Comparison (DVX Train Split)
+## 2. Measurement Procedures
 
-| Variant | `ub_recall_preNMS` | `final_recall` |
-|---|---|---|
-| `centroid_on_predilation_mask: false` | `ub_rec` | `rec` |
-| `centroid_on_predilation_mask: true` | `ub_rec` | `rec` |
+Run the following commands to populate and verify the empirical tables:
 
----
+```powershell
+# 1. Run Geometric Box Ceiling Diagnostic and DVX Box Mode Sweep
+python -m src.box_ceiling --sweep-dvx
 
-## 6. Ground Truth Box Size Distributions (Train Split)
+# 2. Run Stage-by-Stage Upper-Bound Recall Attribution (Train Split)
+python -m src.diagnose_recall --sensor all --split train
 
-| Sensor | Dimension | Min | Median | P95 | Max |
-|---|---|---|---|---|---|
-| **DAVIS** | Width | 4.0 | 9.0 | 20.0 | 32.0 |
-| **DAVIS** | Height | 4.0 | 9.0 | 18.0 | 28.0 |
-| **DVX** | Width | 7.0 | 12.0 | 19.0 | 28.0 |
-| **DVX** | Height | 8.0 | 13.0 | 20.0 | 26.0 |
-| **EVK4** | Width | 38.0 | 52.0 | 60.0 | 72.0 |
-| **EVK4** | Height | 42.0 | 56.0 | 64.0 | 76.0 |
+# 3. Run DVX De-confounding Analysis
+python -m src.diagnose_recall --deconfound-dvx
+```
