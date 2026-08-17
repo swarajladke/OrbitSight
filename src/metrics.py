@@ -171,9 +171,9 @@ def evaluate_sequence(
             "tp": 0,
             "fp": 0,
             "fn": 0,
-            "precision": None,
-            "recall": None,
-            "f1": None,
+            "precision": 0.0,
+            "recall": 0.0,
+            "f1": 0.0,
             "ap": float("nan"),
         }
 

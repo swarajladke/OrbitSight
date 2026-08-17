@@ -156,7 +156,7 @@ def run_upper_bound_recall_attribution(
                 )
 
         # 1. Full pipeline run for final predictions
-        final_preds = run_sequence(events, width, height, cfg, window_us=WINDOW_US)
+        final_preds, _ = run_sequence(events, width, height, cfg, window_us=WINDOW_US)
         final_by_window: Dict[int, List[Tuple[float, float, float, float, float]]] = {}
         for ws, we, cx, cy, bw, bh, conf in final_preds:
             final_by_window.setdefault(ws, []).append((cx, cy, bw, bh, conf))
@@ -325,7 +325,7 @@ def run_dvx_deconfounding(
                         )
                     )
 
-            preds = run_sequence(events, width, height, test_cfg, window_us=WINDOW_US)
+            preds, _ = run_sequence(events, width, height, test_cfg, window_us=WINDOW_US)
             eval_res = evaluate_sequence(gt_rows, preds)
             tot_tp += eval_res["tp"]
             tot_fp += eval_res["fp"]

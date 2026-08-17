@@ -13,21 +13,6 @@ from tabulate import tabulate
 from src.common import infer_resolution, load_events
 from src.metrics import compute_prf1, evaluate_sequence, iou
 from src.pipeline import run_sequence
-
-
-def compute_centered_iou(w_pred: float, h_pred: float, w_gt: float, h_gt: float) -> float:
-    """Compute IoU between two boxes assuming perfect center alignment."""
-    inter_w = min(w_pred, w_gt)
-    inter_h = min(h_pred, h_gt)
-    inter_area = max(0.0, inter_w) * max(0.0, inter_h)
-
-    area_pred = w_pred * h_pred
-    area_gt = w_gt * h_gt
-    union_area = area_pred + area_gt - inter_area
-
-    return float(inter_area / union_area) if union_area > 0 else 0.0
-
-
 def load_all_gt_boxes(dataset_dir: Path, split: str = "train") -> Dict[str, List[Tuple[float, float]]]:
     """Load all GT box dimensions (width, height) grouped by sensor family."""
     gt_files = sorted(list(dataset_dir.rglob("*_bb_windows_40ms.txt")))
@@ -65,13 +50,25 @@ def compute_geometric_ceiling(
     box_h: float,
     iou_thresh: float = 0.5,
 ) -> Tuple[float, float, float]:
-    """Calculate the theoretical maximum achievable recall for a given fixed box geometry."""
+    """Calculate the theoretical maximum achievable recall for a given fixed box geometry using metrics.iou."""
     if not gt_boxes:
         return 0.0, 0.0, 0.0
 
-    ious = [compute_centered_iou(box_w, box_h, gw, gh) for gw, gh in gt_boxes]
-    ious_arr = np.array(ious)
+    bw = float(int(round(box_w)))
+    bh = float(int(round(box_h)))
 
+    ious: List[float] = []
+    for gw, gh in gt_boxes:
+        gw_f, gh_f = float(gw), float(gh)
+        best_cand_iou = 0.0
+        for dx in [-1.0, 0.0, 1.0]:
+            for dy in [-1.0, 0.0, 1.0]:
+                score = iou((dx, dy, bw, bh), (0.0, 0.0, gw_f, gh_f))
+                if score > best_cand_iou:
+                    best_cand_iou = score
+        ious.append(best_cand_iou)
+
+    ious_arr = np.array(ious)
     max_recall = float(np.mean(ious_arr >= iou_thresh))
     mean_iou = float(np.mean(ious_arr))
     median_iou = float(np.median(ious_arr))

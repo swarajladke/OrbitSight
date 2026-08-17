@@ -7,7 +7,7 @@ import hashlib
 from pathlib import Path
 import sys
 import time
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 from tabulate import tabulate
 
@@ -111,6 +111,8 @@ def evaluate_dataset_sequences(
     cfg: Dict[str, Any],
     split_filter: str = "train",
     recompute: bool = False,
+    sequences: Optional[List[str]] = None,
+    max_windows: float = float("inf"),
 ) -> List[Dict[str, Any]]:
     """Evaluate dataset sequences either by reading prediction files or recomputing."""
     gt_files = sorted(list(dataset_dir.rglob("*_bb_windows_40ms.txt")))
@@ -119,6 +121,9 @@ def evaluate_dataset_sequences(
     for gt_f in gt_files:
         seq_name = gt_f.name.replace("_bb_windows_40ms.txt", "")
         split = "train" if "Training" in str(gt_f) else "test"
+
+        if sequences is not None and seq_name not in sequences:
+            continue
 
         if split_filter != "all" and split != split_filter:
             continue
@@ -160,7 +165,9 @@ def evaluate_dataset_sequences(
             width, height = infer_resolution(seq_name, events[:, 0], events[:, 1])
 
             start_t = time.perf_counter()
-            pred_rows, num_windows = run_sequence(events, width, height, cfg, window_us=WINDOW_US)
+            pred_rows, num_windows = run_sequence(
+                events, width, height, cfg, window_us=WINDOW_US, max_windows=max_windows
+            )
             elapsed_ms = (time.perf_counter() - start_t) * 1000.0
             ms_per_win = elapsed_ms / num_windows if num_windows > 0 else 0.0
         else:
@@ -195,7 +202,10 @@ def evaluate_dataset_sequences(
 
 
 def generate_scoreboard_reports(
-    seq_results: List[Dict[str, Any]], cfg_hash: str, tag: str
+    seq_results: List[Dict[str, Any]],
+    cfg_hash: str,
+    tag: str,
+    zero_gt_policy: str = "skip",
 ) -> Tuple[Dict[str, Any], List[Dict[str, Any]], List[Tuple[str, str]]]:
     """Generate structured metric tables and check zero-prediction assertion guard."""
     tot_gt = sum(r["gt_count"] for r in seq_results)
@@ -205,11 +215,18 @@ def generate_scoreboard_reports(
     tot_fn = sum(r["fn"] for r in seq_results)
 
     valid_aps = [r["ap"] for r in seq_results if not np.isnan(r["ap"])]
-    overall_mAP = float(np.mean(valid_aps)) if valid_aps else 0.0
+    mAP_skip = float(np.mean(valid_aps)) if valid_aps else 0.0
+
+    all_aps_zero = [0.0 if np.isnan(r["ap"]) else r["ap"] for r in seq_results]
+    mAP_zero = float(np.mean(all_aps_zero)) if all_aps_zero else 0.0
+
+    overall_mAP = mAP_skip if zero_gt_policy == "skip" else mAP_zero
     overall_prec, overall_rec, overall_f1 = compute_prf1(tot_tp, tot_fp, tot_fn)
 
     overall_metrics = {
         "mAP": overall_mAP,
+        "mAP_skip": mAP_skip,
+        "mAP_zero": mAP_zero,
         "precision": overall_prec,
         "recall": overall_rec,
         "f1": overall_f1,
@@ -260,7 +277,8 @@ def log_run_history(
                 "tag",
                 "config_hash",
                 "split",
-                "mAP",
+                "mAP_skip",
+                "mAP_zero",
                 "precision",
                 "recall",
                 "f1",
@@ -273,7 +291,8 @@ def log_run_history(
             tag,
             cfg_hash,
             split,
-            f"{metrics['mAP']:.6f}",
+            f"{metrics['mAP_skip']:.6f}",
+            f"{metrics['mAP_zero']:.6f}",
             f"{metrics['precision']:.6f}",
             f"{metrics['recall']:.6f}",
             f"{metrics['f1']:.6f}",
@@ -309,6 +328,13 @@ def main() -> None:
         default="train",
         choices=["train", "test", "all"],
         help="Dataset split to score (default: train)",
+    )
+    parser.add_argument(
+        "--zero-gt-policy",
+        type=str,
+        default="skip",
+        choices=["skip", "zero"],
+        help="Policy for sequences with 0 GT boxes (skip: ignore nan, zero: score as 0.0)",
     )
     parser.add_argument(
         "--recompute",
@@ -348,12 +374,15 @@ def main() -> None:
     seq_results = evaluate_dataset_sequences(
         dataset_dir, pred_dir, cfg, split_filter=args.split, recompute=args.recompute
     )
-    overall_metrics, seq_results, zero_failures = generate_scoreboard_reports(seq_results, cfg_hash, args.tag)
+    overall_metrics, seq_results, zero_failures = generate_scoreboard_reports(
+        seq_results, cfg_hash, args.tag, zero_gt_policy=args.zero_gt_policy
+    )
 
     print(f"\nOVERALL METRICS ({args.split.upper()} Split — {len(seq_results)} Sequences):")
     overall_table = [
         [
-            f"{overall_metrics['mAP']:.6f}",
+            f"{overall_metrics['mAP_skip']:.6f}",
+            f"{overall_metrics['mAP_zero']:.6f}",
             f"{overall_metrics['precision']:.6f}",
             f"{overall_metrics['recall']:.6f}",
             f"{overall_metrics['f1']:.6f}",
@@ -365,7 +394,7 @@ def main() -> None:
     print(
         tabulate(
             overall_table,
-            headers=["mAP@0.5", "Precision", "Recall", "F1", "TP", "FP", "FN"],
+            headers=["mAP (Skip Zero-GT)", "mAP (Zero-GT as 0.0)", "Precision", "Recall", "F1", "TP", "FP", "FN"],
             tablefmt="github",
         )
     )
@@ -381,7 +410,7 @@ def main() -> None:
             f"{r['precision']:.4f}",
             f"{r['recall']:.4f}",
             f"{r['f1']:.4f}",
-            f"{r['ap']:.4f}",
+            f"{r['ap']:.4f}" if not np.isnan(r["ap"]) else "nan (0 GT)",
             f"{r['ms_per_window']:.2f}" if args.recompute else "N/A",
         ]
         for r in seq_results
@@ -411,7 +440,7 @@ def main() -> None:
                 f"{r['precision']:.6f}",
                 f"{r['recall']:.6f}",
                 f"{r['f1']:.6f}",
-                f"{r['ap']:.6f}",
+                f"{r['ap']:.6f}" if not np.isnan(r["ap"]) else "nan",
                 f"{r['ms_per_window']:.2f}",
             ])
 
