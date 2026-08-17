@@ -1,4 +1,4 @@
-"""Theoretical box geometry ceiling diagnostic and fast cached box mode sweep suite."""
+"""Theoretical box geometry ceiling diagnostic and fast in-memory box mode sweep suite."""
 
 import argparse
 import csv
@@ -12,7 +12,7 @@ import cv2
 import numpy as np
 from tabulate import tabulate
 
-from src.common import WINDOW_US, event_image, infer_resolution, iter_windows, load_events
+from src.common import WINDOW_US, event_image, infer_resolution, iter_windows, load_events, resolve_effective_config
 from src.detector import detect_boxes
 from src.metrics import compute_prf1, evaluate_sequence, iou
 from src.nms import apply_nms
@@ -85,11 +85,10 @@ def compute_geometric_ceiling(
 def run_dvx_box_mode_evaluation(
     dataset_dir: Path, base_cfg: Dict[str, Any]
 ) -> List[Dict[str, Any]]:
-    """Run fast cached evaluation on 8 DVX training sequences across candidate box modes."""
+    """Run in-memory evaluation on 8 DVX training sequences across candidate box modes."""
     gt_files = sorted(list(dataset_dir.rglob("*_bb_windows_40ms.txt")))
     dvx_train_files = [f for f in gt_files if "DVX" in f.name.upper() and "Training" in str(f)]
 
-    # Candidate box configurations to evaluate
     candidates = [
         {"name": "fixed_18x18", "box_mode": "fixed", "box_w": 18.0, "box_h": 18.0},
         {"name": "fixed_14x15", "box_mode": "fixed", "box_w": 14.0, "box_h": 15.0},
@@ -120,6 +119,16 @@ def run_dvx_box_mode_evaluation(
         for cand in candidates
     }
 
+    # Step 1: Pre-extract raw candidate components for all 8 DVX training sequences
+    print(f"[INFO] Extracting raw components for {len(dvx_train_files)} DVX training sequences...")
+
+    dvx_cfg = deepcopy(base_cfg)
+    if "DVX" not in dvx_cfg:
+        dvx_cfg["DVX"] = {}
+    dvx_cfg["DVX"]["open_kernel"] = 1
+    dvx_cfg["DVX"]["percentile"] = 85.0
+    eff = resolve_effective_config(dvx_cfg, "DVX")
+
     for gt_f in dvx_train_files:
         seq_name = gt_f.name.replace("_bb_windows_40ms.txt", "")
         npy_matches = list(gt_f.parent.glob(f"{seq_name}_labeled_events.npy"))
@@ -146,25 +155,111 @@ def run_dvx_box_mode_evaluation(
                     )
                 )
 
+        # Extract window raw components once
+        window_raw_boxes: List[Tuple[int, int, List[Dict[str, float]]]] = []
+        for w_start, w_end, w_events in iter_windows(events, window_us=WINDOW_US):
+            count_img, _, _ = event_image(w_events, width, height)
+            boxes = detect_boxes(count_img, width, height, dvx_cfg)
+            window_raw_boxes.append((w_start, w_end, boxes))
+
+        num_windows = len(window_raw_boxes)
+        min_hits = int(eff.get("min_hits", 1))
+        max_dist_frac = float(eff.get("max_dist_frac", 0.08))
+        conf_min = float(eff.get("conf_min", 0.0))
+        nms_stage = str(eff.get("nms_stage", "pipeline")).lower()
+        nms_iou_val = eff.get("nms_iou", 0.3)
+        diagonal = math.hypot(width, height)
+        max_dist = max_dist_frac * diagonal
+
+        # Step 2: In-memory evaluation across all candidate box geometries
         for cand in candidates:
-            test_cfg = deepcopy(base_cfg)
-            if "DVX" not in test_cfg:
-                test_cfg["DVX"] = {}
-            test_cfg["DVX"]["open_kernel"] = 1
-            test_cfg["DVX"]["percentile"] = 85.0
-            test_cfg["DVX"]["box_mode"] = cand["box_mode"]
-            if cand["box_mode"] == "fixed":
-                test_cfg["DVX"]["box_w"] = cand["box_w"]
-                test_cfg["DVX"]["box_h"] = cand["box_h"]
+            b_mode = cand["box_mode"]
+            if b_mode == "fixed":
+                cw = cand["box_w"]
+                ch = cand["box_h"]
             else:
-                test_cfg["DVX"]["extent_scale"] = cand["extent_scale"]
-                test_cfg["DVX"]["extent_pad"] = cand["extent_pad"]
-                test_cfg["DVX"]["min_dim"] = cand["min_dim"]
-                test_cfg["DVX"]["max_dim"] = cand["max_dim"]
+                scale_val = cand["extent_scale"]
+                pad_val = cand["extent_pad"]
+                min_d = cand["min_dim"]
+                max_d = cand["max_dim"]
 
-            preds, _ = run_sequence(events, width, height, test_cfg)
+            preds: List[Tuple[int, int, int, int, int, int, float]] = []
+
+            for w_idx in range(num_windows):
+                w_start, w_end, boxes = window_raw_boxes[w_idx]
+                if not boxes:
+                    continue
+
+                prev_boxes = window_raw_boxes[w_idx - 1][2] if w_idx > 0 else []
+                next_boxes = window_raw_boxes[w_idx + 1][2] if w_idx < num_windows - 1 else []
+
+                scored_cands: List[Dict[str, float]] = []
+
+                for box in boxes:
+                    hits = 1
+                    has_prev = any(
+                        math.hypot(box["center_x"] - p["center_x"], box["center_y"] - p["center_y"]) <= max_dist
+                        for p in prev_boxes
+                    )
+                    if has_prev:
+                        hits += 1
+
+                    has_next = any(
+                        math.hypot(box["center_x"] - n["center_x"], box["center_y"] - n["center_y"]) <= max_dist
+                        for n in next_boxes
+                    )
+                    if has_next:
+                        hits += 1
+
+                    if min_hits >= 2 and hits < min_hits:
+                        continue
+
+                    # Adjust geometry
+                    if b_mode == "fixed":
+                        new_w = cw
+                        new_h = ch
+                    else:
+                        raw_w = box["width"] * scale_val + 2.0 * pad_val
+                        raw_h = box["height"] * scale_val + 2.0 * pad_val
+                        new_w = max(min_d, min(max_d, raw_w))
+                        new_h = max(min_d, min(max_d, raw_h))
+
+                    cx = box["center_x"]
+                    cy = box["center_y"]
+                    conf = compute_confidence(box, hits, eff)
+
+                    scored_cands.append({
+                        "center_x": cx,
+                        "center_y": cy,
+                        "width": new_w,
+                        "height": new_h,
+                        "confidence": conf,
+                    })
+
+                if not scored_cands:
+                    continue
+
+                if nms_stage == "pipeline" and nms_iou_val is not None:
+                    try:
+                        scored_cands = apply_nms(scored_cands, float(nms_iou_val))
+                    except (TypeError, ValueError):
+                        pass
+
+                if conf_min > 0.0:
+                    scored_cands = [b for b in scored_cands if b["confidence"] >= conf_min]
+
+                for b in scored_cands:
+                    preds.append((
+                        w_start,
+                        w_end,
+                        int(round(b["center_x"])),
+                        int(round(b["center_y"])),
+                        int(round(b["width"])),
+                        int(round(b["height"])),
+                        round(float(b["confidence"]), 4),
+                    ))
+
             eval_res = evaluate_sequence(gt_rows, preds)
-
             c_entry = results_by_cand[cand["name"]]
             c_entry["preds_emitted"] += len(preds)
             c_entry["tp"] += eval_res["tp"]
@@ -212,7 +307,7 @@ def main() -> None:
     parser.add_argument(
         "--sweep-dvx",
         action="store_true",
-        help="Run full 1-D DVX box geometry sweep on 8 training sequences",
+        help="Run fast in-memory DVX box geometry sweep on 8 training sequences",
     )
 
     args = parser.parse_args()
