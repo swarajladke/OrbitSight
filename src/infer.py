@@ -87,6 +87,11 @@ def process_sequence(
     time_budget_sec: Optional[float] = None,
 ) -> Tuple[float, int]:
     """Process single event sequence file via unified pipeline, write predictions."""
+    start_time = time.perf_counter()
+    deadline_ts = (
+        time.monotonic() + time_budget_sec if time_budget_sec is not None else None
+    )
+
     seq_name = sequence_name_from_npy(npy_path)
     file_mb = npy_path.stat().st_size / (1024 * 1024)
     events = load_events(npy_path)
@@ -95,14 +100,9 @@ def process_sequence(
         f"Processing sequence '{seq_name}' ({file_mb:.2f} MB, {events.shape[0]} events)...",
         flush=True,
     )
-    start_time = time.perf_counter()
 
     width, height = infer_resolution(seq_name, events[:, 0], events[:, 1])
     window_us = int(cfg.get("window_us", WINDOW_US))
-
-    deadline_ts = (
-        time.monotonic() + time_budget_sec if time_budget_sec is not None else None
-    )
 
     predictions, num_windows = run_sequence(
         events,
