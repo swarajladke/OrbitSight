@@ -90,6 +90,19 @@ def run_sequence(
 
     eff = resolve_effective_config(cfg, sensor_name)
 
+    static_thresh = eff.get("static_thresh", None)
+    if static_thresh is not None:
+        from src.static_map import build_static_mask
+
+        static_mask = build_static_mask(
+            events, width, height, window_us=window_us, active_frac_thresh=float(static_thresh)
+        )
+        n_supp = int(np.sum(static_mask))
+        pct_supp = (n_supp / (width * height)) * 100.0
+        print(f"static_mask: {n_supp} pixels suppressed ({pct_supp:.2f}% of frame)", flush=True)
+    else:
+        static_mask = None
+
     window_records: List[Tuple[int, int, List[Dict[str, float]]]] = []
     window_count = 0
 
@@ -98,6 +111,15 @@ def run_sequence(
             break
         count_img, _, _ = event_image(w_events, width, height, need_polarity=False)
         boxes = detect_boxes(count_img, width, height, cfg)
+        if static_mask is not None and boxes:
+            filtered_boxes: List[Dict[str, float]] = []
+            for b in boxes:
+                cy_r = int(round(b["center_y"]))
+                cx_r = int(round(b["center_x"]))
+                if 0 <= cy_r < height and 0 <= cx_r < width and static_mask[cy_r, cx_r]:
+                    continue
+                filtered_boxes.append(b)
+            boxes = filtered_boxes
         window_records.append((w_start, w_end, boxes))
         window_count += 1
         if window_count >= max_windows:
