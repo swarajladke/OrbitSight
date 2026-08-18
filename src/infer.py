@@ -5,7 +5,7 @@ import math
 from pathlib import Path
 import sys
 import time
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 
 from src.common import (
