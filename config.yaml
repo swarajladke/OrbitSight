@@ -10,6 +10,7 @@ max_area_frac: 0.02
 nms_iou: 0.3
 conf_min: 0.05
 max_candidates_per_window: 2
+max_dist_frac: 0.005
 
 # Per-sensor locked optimal configurations
 EVK4:
