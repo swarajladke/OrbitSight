@@ -9,7 +9,7 @@ centroid_mode: "weighted"
 max_area_frac: 0.02
 nms_iou: 0.3
 conf_min: 0.05
-max_candidates_per_window: 1
+max_candidates_per_window: 2
 
 # Per-sensor locked optimal configurations
 EVK4:
@@ -29,7 +29,7 @@ EVK4:
   extent_pad: 4.0
   nms_iou: 0.3
   conf_min: 0.05
-  max_candidates_per_window: 1
+  max_candidates_per_window: 2
 
 DVX:
   percentile: 85.0
@@ -48,7 +48,7 @@ DVX:
   extent_pad: 4.0
   nms_iou: 0.3
   conf_min: 0.05
-  max_candidates_per_window: 1
+  max_candidates_per_window: 2
 
 DAVIS:
   percentile: 97.0
@@ -67,4 +67,4 @@ DAVIS:
   extent_pad: 2.0
   nms_iou: 0.3
   conf_min: 0.05
-  max_candidates_per_window: 1
+  max_candidates_per_window: 2
