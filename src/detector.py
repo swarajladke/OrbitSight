@@ -4,7 +4,7 @@ from typing import Any, Dict, List, Tuple
 import cv2
 import numpy as np
 
-from src.common import resolve_effective_config
+from src.common import int_percentile, resolve_effective_config
 from src.nms import apply_nms
 
 
@@ -53,7 +53,7 @@ def detect_boxes(
     else:
         percentile = base_percentile
 
-    raw_thresh = float(np.percentile(nonzero_vals, percentile))
+    raw_thresh = float(int_percentile(nonzero_vals, percentile))
     thresh = max(1.0, raw_thresh)
 
     binary = (count_img >= thresh).astype(np.uint8)
@@ -100,6 +100,7 @@ def detect_boxes(
 
     nms_stage = str(eff.get("nms_stage", "pipeline")).lower()
     nms_iou_val = eff.get("nms_iou", 0.3)
+    max_comp = int(eff.get("max_components_per_window", 2000))
 
     # Component list after component splitting
     final_components: List[Tuple[float, float, float, float, int]] = []
@@ -118,7 +119,7 @@ def detect_boxes(
 
             if len(sub_nonzero) >= 4:
                 split_perc = min(99.5, percentile + 1.5)
-                split_thresh = float(np.percentile(sub_nonzero, split_perc))
+                split_thresh = float(int_percentile(sub_nonzero, split_perc))
 
                 sub_binary = (sub_count >= split_thresh).astype(np.uint8)
                 n_sub, l_sub, s_sub, _ = cv2.connectedComponentsWithStats(
@@ -232,6 +233,12 @@ def detect_boxes(
                 "confidence": conf,
             }
         )
+
+    # Step 4: Hang guard max_components_per_window
+    if len(results) > max_comp:
+        print(f"[WARN] max_components_per_window hit: kept {max_comp} of {len(results)} candidates")
+        results.sort(key=lambda b: b["density"], reverse=True)
+        results = results[:max_comp]
 
     # Optional detector-stage NMS
     if nms_stage == "detector" and nms_iou_val is not None:

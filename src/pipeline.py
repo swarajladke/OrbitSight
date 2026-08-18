@@ -1,9 +1,9 @@
 """Unified end-to-end inference and evaluation pipeline for OrbitSight.
 
 Execution Order per Window:
-1. Windowing (`iter_windows`) & Count Map Generation (`event_image`)
+1. Windowing (`iter_windows`) & Fast Count Map Generation (`event_image` with need_polarity=False)
 2. Component Detection (`detect_boxes` returning full untruncated component lists)
-3. Neighborhood Persistence Matching against full untruncated neighbor windows (`min_hits`)
+3. Vectorized Neighborhood Persistence Matching against full untruncated neighbor windows (`min_hits`)
 4. Deterministic Multi-term Weighted Confidence Scoring (`compute_confidence`)
 5. Pipeline-stage NMS on weighted confidence (`apply_nms` if `nms_stage == 'pipeline'`)
 6. Confidence Threshold Gating (`conf_min`)
@@ -12,7 +12,8 @@ Execution Order per Window:
 """
 
 import math
-from typing import Any, Dict, List, Tuple
+import time
+from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 
 from src.common import (
@@ -63,6 +64,7 @@ def run_sequence(
     cfg: Dict[str, Any],
     window_us: int = WINDOW_US,
     max_windows: float = float("inf"),
+    deadline_ts: Optional[float] = None,
 ) -> Tuple[List[Tuple[int, int, int, int, int, int, float]], int]:
     """Run full unified detection pipeline on event stream.
 
@@ -73,6 +75,7 @@ def run_sequence(
         cfg: Configuration dictionary.
         window_us: Window duration in microseconds (default 40,000 us).
         max_windows: Maximum windows to process (for testing/smoke tests).
+        deadline_ts: Optional monotonic deadline timestamp.
 
     Returns:
         Tuple of (prediction_rows, num_windows_processed).
@@ -91,7 +94,9 @@ def run_sequence(
     window_count = 0
 
     for w_start, w_end, w_events in iter_windows(events, window_us=window_us):
-        count_img, _, _ = event_image(w_events, width, height)
+        if deadline_ts is not None and time.monotonic() > deadline_ts:
+            break
+        count_img, _, _ = event_image(w_events, width, height, need_polarity=False)
         boxes = detect_boxes(count_img, width, height, cfg)
         window_records.append((w_start, w_end, boxes))
         window_count += 1
@@ -116,6 +121,7 @@ def run_sequence(
 
     diagonal = math.hypot(width, height)
     max_dist = max_dist_frac * diagonal
+    max_dist_sq = max_dist * max_dist
 
     predictions: List[Tuple[int, int, int, int, int, int, float]] = []
 
@@ -129,32 +135,28 @@ def run_sequence(
             window_records[w_idx + 1][2] if w_idx < num_windows - 1 else []
         )
 
+        n_cur = len(boxes)
+        cur_centers = np.array([[b["center_x"], b["center_y"]] for b in boxes], dtype=np.float32)
+
+        has_prev = np.zeros(n_cur, dtype=bool)
+        if prev_boxes:
+            p_centers = np.array([[p["center_x"], p["center_y"]] for p in prev_boxes], dtype=np.float32)
+            diff_p = cur_centers[:, None, :] - p_centers[None, :, :]
+            dist_sq_p = np.sum(diff_p * diff_p, axis=2)
+            has_prev = np.any(dist_sq_p <= max_dist_sq, axis=1)
+
+        has_next = np.zeros(n_cur, dtype=bool)
+        if next_boxes:
+            n_centers = np.array([[n["center_x"], n["center_y"]] for n in next_boxes], dtype=np.float32)
+            diff_n = cur_centers[:, None, :] - n_centers[None, :, :]
+            dist_sq_n = np.sum(diff_n * diff_n, axis=2)
+            has_next = np.any(dist_sq_n <= max_dist_sq, axis=1)
+
         scored_cands: List[Dict[str, float]] = []
 
-        # 1. Persistence matching on full untruncated neighbor lists & weighted scoring
-        for box in boxes:
-            hits = 1
-            has_prev = any(
-                math.hypot(
-                    box["center_x"] - p["center_x"],
-                    box["center_y"] - p["center_y"],
-                )
-                <= max_dist
-                for p in prev_boxes
-            )
-            if has_prev:
-                hits += 1
-
-            has_next = any(
-                math.hypot(
-                    box["center_x"] - n["center_x"],
-                    box["center_y"] - n["center_y"],
-                )
-                <= max_dist
-                for n in next_boxes
-            )
-            if has_next:
-                hits += 1
+        # 1. Vectorized persistence matching on full untruncated neighbor lists & weighted scoring
+        for idx, box in enumerate(boxes):
+            hits = 1 + int(has_prev[idx]) + int(has_next[idx])
 
             if min_hits >= 2 and hits < min_hits:
                 continue

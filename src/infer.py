@@ -84,6 +84,7 @@ def process_sequence(
     output_dir: Path,
     cfg: Dict[str, Any],
     max_windows: float = float("inf"),
+    time_budget_sec: Optional[float] = None,
 ) -> Tuple[float, int]:
     """Process single event sequence file via unified pipeline, write predictions."""
     seq_name = sequence_name_from_npy(npy_path)
@@ -99,9 +100,25 @@ def process_sequence(
     width, height = infer_resolution(seq_name, events[:, 0], events[:, 1])
     window_us = int(cfg.get("window_us", WINDOW_US))
 
-    predictions, num_windows = run_sequence(
-        events, width, height, cfg, window_us=window_us, max_windows=max_windows
+    deadline_ts = (
+        time.monotonic() + time_budget_sec if time_budget_sec is not None else None
     )
+
+    predictions, num_windows = run_sequence(
+        events,
+        width,
+        height,
+        cfg,
+        window_us=window_us,
+        max_windows=max_windows,
+        deadline_ts=deadline_ts,
+    )
+
+    if deadline_ts is not None and time.monotonic() >= deadline_ts:
+        print(
+            f"[SKIPPED] {seq_name}: exceeded time budget at window {num_windows}",
+            flush=True,
+        )
 
     output_lines: List[str] = [
         "window_start_timestamp_us\twindow_end_timestamp_us\tcenter_x\tcenter_y\twidth\theight\tconfidence"
@@ -159,6 +176,12 @@ def main() -> None:
         default=None,
         help="Stop after N windows per sequence (smoke test)",
     )
+    parser.add_argument(
+        "--time-budget-sec",
+        type=float,
+        default=None,
+        help="Abort sequence if processing exceeds budget in seconds",
+    )
 
     args = parser.parse_args()
 
@@ -206,16 +229,20 @@ def main() -> None:
             f"\n[{idx}/{len(npy_files)}] Starting sequence processing...",
             flush=True,
         )
-        seq_ms, num_w = process_sequence(npy_file, output_dir, cfg, max_windows=max_w)
-        ms_per_window = seq_ms / num_w if num_w > 0 else 0.0
-        seq_name = sequence_name_from_npy(npy_file)
-        print(
-            f"Done '{seq_name}': {seq_ms:.2f} ms total, "
-            f"{ms_per_window:.2f} ms/window across {num_w} windows.",
-            flush=True,
+        seq_ms, num_w = process_sequence(
+            npy_file,
+            output_dir,
+            cfg,
+            max_windows=max_w,
+            time_budget_sec=args.time_budget_sec,
         )
+        ms_per_window = seq_ms / num_w if num_w > 0 else 0.0
         total_time_ms += seq_ms
         total_windows += num_w
+        print(
+            f"Done '{sequence_name_from_npy(npy_file)}': {seq_ms:.2f} ms total, {ms_per_window:.2f} ms/window across {num_w} windows.",
+            flush=True,
+        )
 
     avg_ms_per_window = total_time_ms / total_windows if total_windows > 0 else 0.0
     print("\n--------------------------------------------------", flush=True)
