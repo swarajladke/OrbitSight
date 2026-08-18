@@ -39,8 +39,8 @@ DVX:
   min_hits: 2
   box_mode: "fixed"
   centroid_mode: "weighted"
-  box_w: 18
-  box_h: 18
+  box_w: 12
+  box_h: 12
   max_area_frac: 0.05
   min_dim: 12
   max_dim: 60
