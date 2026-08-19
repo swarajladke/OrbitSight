@@ -3,10 +3,11 @@
 import argparse
 from pathlib import Path
 import sys
+from typing import Any, Dict, List
 import numpy as np
 
 from src.report_xlsx import write_metrics_xlsx
-from src.scoreboard import evaluate_all_sequences
+from src.scoreboard import evaluate_dataset_sequences
 
 
 def main() -> None:
@@ -46,9 +47,10 @@ def main() -> None:
     out_path = Path(args.out).resolve()
 
     print(f"Computing evaluation metrics from {pred_dir} against {dataset_dir}...", flush=True)
-    seq_results = evaluate_all_sequences(
+    seq_results = evaluate_dataset_sequences(
         dataset_dir,
         pred_dir,
+        cfg={},
         split_filter=args.split,
         recompute=False,
     )
