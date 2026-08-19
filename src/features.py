@@ -163,6 +163,137 @@ def extract_candidate_features(
     }
 
 
+def extract_window_features_batch(
+    candidates: List[Dict[str, Any]],
+    prev_candidates: Optional[List[Dict[str, Any]]],
+    next_candidates: Optional[List[Dict[str, Any]]],
+    count_img: Optional[np.ndarray] = None,
+    static_frac_map: Optional[np.ndarray] = None,
+) -> List[Dict[str, float]]:
+    """Extract motion, geometric, and static spatial features for all candidate boxes in a window (vectorized)."""
+    if not candidates:
+        return []
+
+    n_cur = len(candidates)
+    cur_cx = np.array([float(c.get("center_x", 0.0)) for c in candidates], dtype=np.float64)
+    cur_cy = np.array([float(c.get("center_y", 0.0)) for c in candidates], dtype=np.float64)
+    cur_centers = np.column_stack([cur_cx, cur_cy])
+
+    # 1. Neighbor matching for prev_candidates
+    disp_prev = np.full(n_cur, -1.0, dtype=np.float64)
+    vec_prev = [None] * n_cur
+    if prev_candidates:
+        p_cx = np.array([float(p.get("center_x", 0.0)) for p in prev_candidates], dtype=np.float64)
+        p_cy = np.array([float(p.get("center_y", 0.0)) for p in prev_candidates], dtype=np.float64)
+        p_centers = np.column_stack([p_cx, p_cy])
+
+        # Squared distance matrix: (n_cur, n_prev) in float64
+        diff_p = cur_centers[:, None, :] - p_centers[None, :, :]
+        dist_sq_p = np.sum(diff_p * diff_p, axis=2)
+
+        # argmin returns first minimum (matching strict < comparison)
+        min_p_indices = np.argmin(dist_sq_p, axis=1)
+        disp_prev = np.empty(n_cur, dtype=np.float64)
+        for i in range(n_cur):
+            best_idx = min_p_indices[i]
+            dx = cur_cx[i] - p_cx[best_idx]
+            dy = cur_cy[i] - p_cy[best_idx]
+            disp_prev[i] = math.hypot(dx, dy)
+            vec_prev[i] = (dx, dy)
+
+    # 2. Neighbor matching for next_candidates
+    disp_next = np.full(n_cur, -1.0, dtype=np.float64)
+    vec_next = [None] * n_cur
+    if next_candidates:
+        n_cx = np.array([float(n.get("center_x", 0.0)) for n in next_candidates], dtype=np.float64)
+        n_cy = np.array([float(n.get("center_y", 0.0)) for n in next_candidates], dtype=np.float64)
+        n_centers = np.column_stack([n_cx, n_cy])
+
+        # Squared distance matrix: (n_cur, n_next) in float64
+        diff_n = cur_centers[:, None, :] - n_centers[None, :, :]
+        dist_sq_n = np.sum(diff_n * diff_n, axis=2)
+
+        min_n_indices = np.argmin(dist_sq_n, axis=1)
+
+        disp_next = np.empty(n_cur, dtype=np.float64)
+        for i in range(n_cur):
+            best_idx = min_n_indices[i]
+            dx = n_cx[best_idx] - cur_cx[i]
+            dy = n_cy[best_idx] - cur_cy[i]
+            disp_next[i] = math.hypot(dx, dy)
+            vec_next[i] = (dx, dy)
+
+    # 3. Assemble feature dicts
+    out: List[Dict[str, float]] = []
+    h_map, w_map = (static_frac_map.shape[0], static_frac_map.shape[1]) if static_frac_map is not None else (0, 0)
+
+    for i, c in enumerate(candidates):
+        cx = cur_cx[i]
+        cy = cur_cy[i]
+        bw = max(1.0, float(c.get("width", 1.0)))
+        bh = max(1.0, float(c.get("height", 1.0)))
+        area = bw * bh
+        events = float(c.get("events", 1.0))
+        density = events / area
+        aspect = max(bw, bh) / max(min(bw, bh), 1.0)
+        hits = float(c.get("hits", c.get("persistence_hits", 1.0)))
+
+        d_p = float(disp_prev[i])
+        d_n = float(disp_next[i])
+
+        if d_p >= 0.0 and d_n >= 0.0:
+            speed = (d_p + d_n) / 2.0
+        elif d_p >= 0.0:
+            speed = d_p
+        elif d_n >= 0.0:
+            speed = d_n
+        else:
+            speed = -1.0
+
+        dir_consistency = -1.0
+        vp = vec_prev[i]
+        vn = vec_next[i]
+        if vp is not None and vn is not None:
+            mag_p = math.hypot(vp[0], vp[1])
+            mag_n = math.hypot(vn[0], vn[1])
+            if mag_p > 1e-4 and mag_n > 1e-4:
+                dot = vp[0] * vn[0] + vp[1] * vn[1]
+                cos_sim = dot / (mag_p * mag_n)
+                dir_consistency = max(-1.0, min(1.0, cos_sim))
+
+        static_frac = 0.0
+        if static_frac_map is not None:
+            cy_r = int(round(cy))
+            cx_r = int(round(cx))
+            if 0 <= cy_r < h_map and 0 <= cx_r < w_map:
+                static_frac = float(static_frac_map[cy_r, cx_r])
+
+        if "local_bg" in c and c["local_bg"] is not None:
+            local_bg = float(c["local_bg"])
+        elif count_img is not None:
+            local_bg = extract_local_bg(count_img, cx, cy, bw, bh, pad=4)
+        else:
+            local_bg = 0.0
+
+        out.append({
+            "events": events,
+            "density": density,
+            "area": area,
+            "extent_w": bw,
+            "extent_h": bh,
+            "aspect": aspect,
+            "hits": hits,
+            "disp_prev": d_p,
+            "disp_next": d_n,
+            "speed": speed,
+            "dir_consistency": dir_consistency,
+            "static_frac": static_frac,
+            "local_bg": local_bg,
+        })
+
+    return out
+
+
 def compute_roc_auc(y_true: np.ndarray, y_score: np.ndarray) -> float:
     """Compute exact binary ROC-AUC score via rank sum."""
     pos = y_score[y_true == 1]
