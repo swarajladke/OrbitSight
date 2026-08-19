@@ -81,8 +81,10 @@ def extract_sequence_dataset(
     else:
         static_mask = None
 
+    from src.features import extract_local_bg
+
     # Pre-collect all window candidate lists
-    window_records: List[Tuple[int, int, List[Dict[str, Any]], np.ndarray]] = []
+    window_records: List[Tuple[int, int, List[Dict[str, Any]]]] = []
     for ws, we, w_events in iter_windows(events, window_us=WINDOW_US):
         count_img, _, _ = event_image(w_events, width, height, need_polarity=False)
         boxes = detect_boxes(count_img, width, height, cfg)
@@ -95,7 +97,13 @@ def extract_sequence_dataset(
                     continue
                 filtered.append(b)
             boxes = filtered
-        window_records.append((ws, we, boxes, count_img))
+
+        for b in boxes:
+            b["local_bg"] = extract_local_bg(
+                count_img, float(b["center_x"]), float(b["center_y"]), float(b["width"]), float(b["height"])
+            )
+
+        window_records.append((ws, we, boxes))
 
     X_list: List[List[float]] = []
     y_list: List[int] = []
@@ -106,7 +114,7 @@ def extract_sequence_dataset(
         gt_by_start.setdefault(g[0], []).append(g)
 
     num_w = len(window_records)
-    for w_idx, (ws, we, boxes, count_img) in enumerate(window_records):
+    for w_idx, (ws, we, boxes) in enumerate(window_records):
         if not boxes:
             continue
 

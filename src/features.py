@@ -139,7 +139,12 @@ def extract_candidate_features(
             static_frac = float(static_frac_map[cy_r, cx_r])
 
     # Local background
-    local_bg = extract_local_bg(count_img, cx, cy, bw, bh, pad=4)
+    if "local_bg" in candidate and candidate["local_bg"] is not None:
+        local_bg = float(candidate["local_bg"])
+    elif count_img is not None:
+        local_bg = extract_local_bg(count_img, cx, cy, bw, bh, pad=4)
+    else:
+        local_bg = 0.0
 
     return {
         "events": events,

@@ -101,7 +101,9 @@ def run_sequence(
     else:
         static_mask = None
 
-    window_records: List[Tuple[int, int, List[Dict[str, float]], np.ndarray]] = []
+    from src.features import extract_local_bg
+
+    window_records: List[Tuple[int, int, List[Dict[str, float]]]] = []
     window_count = 0
 
     for w_start, w_end, w_events in iter_windows(events, window_us=window_us):
@@ -118,7 +120,14 @@ def run_sequence(
                     continue
                 filtered_boxes.append(b)
             boxes = filtered_boxes
-        window_records.append((w_start, w_end, boxes, count_img))
+
+        # Precompute candidate local_bg while count_img is live in CPU cache (avoids caching gigabytes of 2D images)
+        for b in boxes:
+            b["local_bg"] = extract_local_bg(
+                count_img, float(b["center_x"]), float(b["center_y"]), float(b["width"]), float(b["height"])
+            )
+
+        window_records.append((w_start, w_end, boxes))
         window_count += 1
         if window_count >= max_windows:
             break
@@ -164,7 +173,7 @@ def run_sequence(
     predictions: List[Tuple[int, int, int, int, int, int, float]] = []
 
     for w_idx in range(num_windows):
-        w_start, w_end, boxes, count_img = window_records[w_idx]
+        w_start, w_end, boxes = window_records[w_idx]
         if not boxes:
             continue
 
