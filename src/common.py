@@ -89,7 +89,35 @@ def load_events(path: Union[str, Path]) -> np.ndarray:
         NumPy array of shape (N, 6) containing event data.
     """
     file_path = Path(path)
+    if file_path.stat().st_size > LARGE_FILE_THRESHOLD_BYTES:
+        return np.load(file_path, allow_pickle=False, mmap_mode="r")
     return np.load(file_path, allow_pickle=False)
+
+
+def int_percentile(vals: np.ndarray, q: float) -> float:
+    """Exact percentile for small non-negative integer arrays, O(n) with no sort."""
+    if vals.size == 0:
+        return 0.0
+    if vals.size == 1:
+        return float(vals[0])
+
+    int_vals = vals.astype(np.int64)
+    max_val = int(np.max(int_vals))
+    counts = np.bincount(int_vals, minlength=max_val + 1)
+    cum = np.cumsum(counts)
+    n = len(vals)
+
+    v = (n - 1) * (q / 100.0)
+    i = int(np.floor(v))
+    f = v - i
+
+    val_i = float(np.searchsorted(cum, i + 1))
+    if i + 1 < n:
+        val_next = float(np.searchsorted(cum, i + 2))
+    else:
+        val_next = val_i
+
+    return float(val_i + f * (val_next - val_i))
 
 
 def iter_windows(
@@ -122,18 +150,33 @@ def iter_windows(
 
 
 def event_image(
-    window: np.ndarray, width: int, height: int
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    window: np.ndarray, width: int, height: int, need_polarity: bool = True
+) -> Tuple[np.ndarray, Optional[np.ndarray], Optional[np.ndarray]]:
     """Accumulate event count, positive, and negative polarity images.
 
     Args:
         window: Window event array of shape (K, 6).
         width: Image width.
         height: Image height.
+        need_polarity: If False, skip polarity allocations and use fast bincount.
 
     Returns:
         Tuple of (count_img, pos_img, neg_img) float32 arrays of shape (height, width).
     """
+    if not need_polarity:
+        if window.shape[0] == 0:
+            return np.zeros((height, width), dtype=np.float32), None, None
+        x = window[:, 0].astype(np.int64)
+        y = window[:, 1].astype(np.int64)
+        valid = (x >= 0) & (x < width) & (y >= 0) & (y < height)
+        x = x[valid]
+        y = y[valid]
+        if len(x) == 0:
+            return np.zeros((height, width), dtype=np.float32), None, None
+        flat = np.bincount(y * width + x, minlength=width * height)
+        count_img = flat.reshape(height, width).astype(np.float32)
+        return count_img, None, None
+
     count_img = np.zeros((height, width), dtype=np.float32)
     pos_img = np.zeros((height, width), dtype=np.float32)
     neg_img = np.zeros((height, width), dtype=np.float32)

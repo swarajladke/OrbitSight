@@ -1,0 +1,10 @@
+.venv
+.git
+predictions/
+experiments/
+output/
+__pycache__
+*.npy
+*.tar
+OrbitSight_Dataset/
+*.xlsx
