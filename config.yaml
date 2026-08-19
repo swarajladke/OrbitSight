@@ -12,6 +12,7 @@ conf_min: 0.05
 max_candidates_per_window: 2
 max_dist_frac: 0.04
 static_thresh: 0.5
+scorer_mode: "weighted"
 
 # Per-sensor locked optimal configurations
 EVK4:

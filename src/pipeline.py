@@ -174,19 +174,59 @@ def run_sequence(
             dist_sq_n = np.sum(diff_n * diff_n, axis=2)
             has_next = np.any(dist_sq_n <= max_dist_sq, axis=1)
 
+        scorer_mode = str(eff.get("scorer_mode", "weighted")).lower()
         scored_cands: List[Dict[str, float]] = []
 
-        # 1. Vectorized persistence matching on full untruncated neighbor lists & weighted scoring
-        for idx, box in enumerate(boxes):
-            hits = 1 + int(has_prev[idx]) + int(has_next[idx])
+        # 1. Vectorized persistence matching & candidate scoring
+        learned_model = None
+        if scorer_mode == "learned":
+            from pathlib import Path
+            import joblib
+            model_path = Path("models/scorer.joblib")
+            if model_path.exists():
+                try:
+                    learned_model = joblib.load(model_path)
+                except Exception:
+                    learned_model = None
 
-            if min_hits >= 2 and hits < min_hits:
-                continue
+        if learned_model is not None:
+            from src.features import FEATURE_NAMES, extract_candidate_features
+            cand_features_list = []
+            cand_boxes_list = []
+            for idx, box in enumerate(boxes):
+                hits = 1 + int(has_prev[idx]) + int(has_next[idx])
+                if min_hits >= 2 and hits < min_hits:
+                    continue
+                feats = extract_candidate_features(
+                    box,
+                    prev_boxes,
+                    next_boxes,
+                    count_img,
+                    static_frac_map=None,
+                )
+                feat_vec = [feats[name] for name in FEATURE_NAMES]
+                cand_features_list.append(feat_vec)
+                box_copy = dict(box)
+                box_copy["hits"] = hits
+                cand_boxes_list.append(box_copy)
 
-            conf = compute_confidence(box, hits, eff)
-            box_copy = dict(box)
-            box_copy["confidence"] = conf
-            scored_cands.append(box_copy)
+            if cand_features_list:
+                X_cand = np.array(cand_features_list, dtype=np.float32)
+                probs = learned_model.predict_proba(X_cand)[:, 1]
+                for b_copy, p_score in zip(cand_boxes_list, probs):
+                    b_copy["confidence"] = float(p_score)
+                    scored_cands.append(b_copy)
+        else:
+            for idx, box in enumerate(boxes):
+                hits = 1 + int(has_prev[idx]) + int(has_next[idx])
+
+                if min_hits >= 2 and hits < min_hits:
+                    continue
+
+                conf = compute_confidence(box, hits, eff)
+                box_copy = dict(box)
+                box_copy["confidence"] = conf
+                scored_cands.append(box_copy)
 
         if not scored_cands:
             continue
