@@ -2,6 +2,7 @@
 
 import argparse
 import math
+import os
 from pathlib import Path
 import sys
 import time
@@ -143,13 +144,13 @@ def main() -> None:
     parser.add_argument(
         "--input_dir",
         type=str,
-        default="../OrbitSight_Dataset",
+        default=None,
         help="Path to input dataset directory",
     )
     parser.add_argument(
         "--output_dir",
         type=str,
-        default="predictions",
+        default=None,
         help="Path to output predictions directory",
     )
     parser.add_argument(
@@ -185,8 +186,14 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    input_dir = Path(args.input_dir).resolve()
-    print(f"Input directory resolved to: {input_dir}", flush=True)
+    raw_input_dir = args.input_dir or os.environ.get("ORBITSIGHT_DATASET_DIR") or "../OrbitSight_Dataset"
+    raw_output_dir = args.output_dir or os.environ.get("ORBITSIGHT_OUTPUT_DIR") or "predictions"
+
+    input_dir = Path(raw_input_dir).resolve()
+    output_dir = Path(raw_output_dir).resolve()
+
+    print(f"Dataset directory resolved to: {input_dir}", flush=True)
+    print(f"Output directory resolved to: {output_dir}", flush=True)
 
     npy_files = sorted(list(input_dir.rglob("*_labeled_events.npy")))
     print(
