@@ -202,8 +202,7 @@ def run_sequence(
         scored_cands: List[Dict[str, float]] = []
 
         if learned_model is not None:
-            from src.features import FEATURE_NAMES, extract_candidate_features
-            cand_features_list = []
+            from src.features import FEATURE_NAMES, extract_window_features_batch
             cand_boxes_list = []
             for idx, box in enumerate(boxes):
                 hits = 1 + int(has_prev[idx]) + int(has_next[idx])
@@ -211,18 +210,20 @@ def run_sequence(
                     continue
                 box_copy = dict(box)
                 box_copy["hits"] = hits
-                feats = extract_candidate_features(
-                    box_copy,
-                    prev_boxes,
-                    next_boxes,
-                    count_img,
-                    static_frac_map=static_frac_map,
-                )
-                feat_vec = [feats[name] for name in FEATURE_NAMES]
-                cand_features_list.append(feat_vec)
+                assert "local_bg" in box_copy and box_copy["local_bg"] is not None, "Missing precomputed local_bg"
                 cand_boxes_list.append(box_copy)
 
-            if cand_features_list:
+            if cand_boxes_list:
+                batch_feats = extract_window_features_batch(
+                    cand_boxes_list,
+                    prev_boxes,
+                    next_boxes,
+                    count_img=None,
+                    static_frac_map=static_frac_map,
+                )
+                cand_features_list = [
+                    [f[name] for name in FEATURE_NAMES] for f in batch_feats
+                ]
                 X_cand = np.array(cand_features_list, dtype=np.float32)
                 probs = learned_model.predict_proba(X_cand)[:, 1]
                 for b_copy, p_score in zip(cand_boxes_list, probs):
