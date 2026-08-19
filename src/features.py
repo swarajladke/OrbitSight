@@ -3,13 +3,11 @@
 import argparse
 import math
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 from tabulate import tabulate
-import yaml
 
-from src.common import infer_resolution, load_events, sequence_name_from_npy
-from src.metrics import iou
+from src.scoreboard import load_yaml_config
 
 
 FEATURE_NAMES = [
@@ -180,8 +178,7 @@ def generate_feature_auc_report(dataset_dir: Path, config_path: Path) -> None:
     """Generate and print feature separability report on train split sequences."""
     from src.train_scorer import extract_sequence_dataset
 
-    with open(config_path, "r", encoding="utf-8") as f:
-        cfg = yaml.safe_load(f)
+    cfg = load_yaml_config(config_path)
 
     train_gt_files = [
         f for f in sorted(list(dataset_dir.rglob("*_bb_windows_40ms.txt")))

@@ -1,6 +1,7 @@
 """Train learned candidate re-scorer on training split sequences."""
 
 import argparse
+import csv
 import json
 import math
 from pathlib import Path
@@ -10,14 +11,40 @@ import joblib
 import numpy as np
 from sklearn.ensemble import HistGradientBoostingClassifier
 from sklearn.metrics import roc_auc_score
-import yaml
 
-from src.common import WINDOW_US, event_image, infer_resolution, iter_windows, load_events, sequence_name_from_npy
+from src.common import (
+    WINDOW_US,
+    event_image,
+    infer_resolution,
+    iter_windows,
+    load_events,
+    resolve_effective_config,
+    sequence_name_from_npy,
+)
 from src.detector import detect_boxes
 from src.features import FEATURE_NAMES, extract_candidate_features
 from src.metrics import iou, windows_overlap
-from src.scoreboard import load_gt_file, resolve_effective_config
+from src.scoreboard import load_yaml_config
 from src.static_map import build_continuous_static_map
+
+
+def load_gt_file(gt_path: Path) -> List[Tuple[int, int, int, int, int, int]]:
+    """Read *_bb_windows_40ms.txt ground truth file and return list of int tuples."""
+    gt_rows: List[Tuple[int, int, int, int, int, int]] = []
+    with open(gt_path, "r", encoding="utf-8") as f:
+        rdr = csv.DictReader(f, delimiter="\t")
+        for r in rdr:
+            gt_rows.append(
+                (
+                    int(r["window_start_timestamp_us"]),
+                    int(r["window_end_timestamp_us"]),
+                    int(r["center_x"]),
+                    int(r["center_y"]),
+                    int(r["width"]),
+                    int(r["height"]),
+                )
+            )
+    return gt_rows
 
 
 def extract_sequence_dataset(
@@ -73,6 +100,11 @@ def extract_sequence_dataset(
     X_list: List[List[float]] = []
     y_list: List[int] = []
 
+    # Map GT boxes by start timestamp for O(1) common-path lookup
+    gt_by_start: Dict[int, List[Tuple[int, int, int, int, int, int]]] = {}
+    for g in gt_rows:
+        gt_by_start.setdefault(g[0], []).append(g)
+
     num_w = len(window_records)
     for w_idx, (ws, we, boxes, count_img) in enumerate(window_records):
         if not boxes:
@@ -100,10 +132,10 @@ def extract_sequence_dataset(
             dist_sq_n = np.sum(diff_n * diff_n, axis=2)
             has_next = np.any(dist_sq_n <= max_dist_sq, axis=1)
 
-        gt_matches = [
-            g for g in gt_rows
-            if (g[0] == ws and g[1] == we) or windows_overlap(ws, we, g[0], g[1])
-        ]
+        # O(1) fast start lookup with overlap fallback
+        gt_matches = gt_by_start.get(ws, [])
+        if not gt_matches:
+            gt_matches = [g for g in gt_rows if windows_overlap(ws, we, g[0], g[1])]
 
         for idx, box in enumerate(boxes):
             hits = 1 + int(has_prev[idx]) + int(has_next[idx])
@@ -153,8 +185,7 @@ def train_scorer(
     """Train Gradient Boosting re-scorer strictly on training split sequences."""
     models_dir.mkdir(parents=True, exist_ok=True)
 
-    with open(config_path, "r", encoding="utf-8") as f:
-        cfg = yaml.safe_load(f)
+    cfg = load_yaml_config(config_path)
 
     # Locate training ground truth files using scoreboard's split-resolution rule
     train_gt_files = [
