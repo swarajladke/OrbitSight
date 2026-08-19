@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import math
 from pathlib import Path
 import sys
 from typing import Any, Dict, List, Tuple
@@ -14,42 +15,9 @@ import yaml
 from src.common import WINDOW_US, event_image, infer_resolution, iter_windows, load_events, sequence_name_from_npy
 from src.detector import detect_boxes
 from src.features import FEATURE_NAMES, extract_candidate_features
-from src.metrics import iou
-from src.scoreboard import load_gt_file
-from src.static_map import build_static_mask
-
-
-def build_continuous_static_map(events: np.ndarray, width: int, height: int, window_us: int = WINDOW_US) -> np.ndarray:
-    """Compute continuous window activity fraction map across the entire sequence."""
-    if events.shape[0] == 0:
-        return np.zeros((height, width), dtype=np.float32)
-
-    t = events[:, 3]
-    t_start = int(t[0])
-    t_end = int(t[-1])
-    num_windows = int(np.ceil((t_end - t_start + 1) / float(window_us)))
-    if num_windows <= 0:
-        return np.zeros((height, width), dtype=np.float32)
-
-    x = events[:, 0].astype(np.int64)
-    y = events[:, 1].astype(np.int64)
-    w_idx = (t.astype(np.int64) - t_start) // window_us
-
-    valid = (x >= 0) & (x < width) & (y >= 0) & (y < height) & (w_idx >= 0) & (w_idx < num_windows)
-    x = x[valid]
-    y = y[valid]
-    w_idx = w_idx[valid]
-
-    if len(x) == 0:
-        return np.zeros((height, width), dtype=np.float32)
-
-    pixel_idx = y * width + x
-    combined_key = w_idx * (width * height) + pixel_idx
-    unique_keys = np.unique(combined_key)
-    unique_pixels = unique_keys % (width * height)
-
-    active_counts = np.bincount(unique_pixels, minlength=width * height)
-    return active_counts.reshape(height, width).astype(np.float32) / float(num_windows)
+from src.metrics import iou, windows_overlap
+from src.scoreboard import load_gt_file, resolve_effective_config
+from src.static_map import build_continuous_static_map
 
 
 def extract_sequence_dataset(
@@ -62,11 +30,29 @@ def extract_sequence_dataset(
     events = load_events(npy_path)
     width, height = infer_resolution(seq_name, events[:, 0], events[:, 1])
 
+    if width >= 1200:
+        sensor_name = "EVK4"
+    elif width >= 600:
+        sensor_name = "DVX"
+    else:
+        sensor_name = "DAVIS"
+
+    eff = resolve_effective_config(cfg, sensor_name)
+    min_hits = int(eff.get("min_hits", 1))
+    max_dist_frac = float(eff.get("max_dist_frac", 0.08))
+    diagonal = math.hypot(width, height)
+    max_dist = max_dist_frac * diagonal
+    max_dist_sq = max_dist * max_dist
+
     gt_rows = load_gt_file(gt_path)
 
     # Build continuous static fraction map and discrete static mask
-    static_frac_map = build_continuous_static_map(events, width, height)
-    static_mask = static_frac_map >= float(cfg.get("static_thresh", 0.5))
+    static_frac_map = build_continuous_static_map(events, width, height, window_us=WINDOW_US)
+    static_thresh = eff.get("static_thresh", None)
+    if static_thresh is not None:
+        static_mask = static_frac_map >= float(static_thresh)
+    else:
+        static_mask = None
 
     # Pre-collect all window candidate lists
     window_records: List[Tuple[int, int, List[Dict[str, Any]], np.ndarray]] = []
@@ -87,24 +73,48 @@ def extract_sequence_dataset(
     X_list: List[List[float]] = []
     y_list: List[int] = []
 
-    # Map GT boxes by start timestamp for O(1) matching
-    gt_by_start: Dict[int, List[Tuple[int, int, int, int, int, int]]] = {}
-    for g in gt_rows:
-        gt_by_start.setdefault(g[0], []).append(g)
-
     num_w = len(window_records)
     for w_idx, (ws, we, boxes, count_img) in enumerate(window_records):
         if not boxes:
             continue
 
-        prev_boxes = window_records[w_idx - 1][2] if w_idx > 0 else None
-        next_boxes = window_records[w_idx + 1][2] if w_idx < num_w - 1 else None
+        prev_boxes = window_records[w_idx - 1][2] if w_idx > 0 else []
+        next_boxes = (
+            window_records[w_idx + 1][2] if w_idx < num_w - 1 else []
+        )
 
-        gt_matches = gt_by_start.get(ws, [])
+        n_cur = len(boxes)
+        cur_centers = np.array([[b["center_x"], b["center_y"]] for b in boxes], dtype=np.float32)
 
-        for b in boxes:
+        has_prev = np.zeros(n_cur, dtype=bool)
+        if prev_boxes:
+            p_centers = np.array([[p["center_x"], p["center_y"]] for p in prev_boxes], dtype=np.float32)
+            diff_p = cur_centers[:, None, :] - p_centers[None, :, :]
+            dist_sq_p = np.sum(diff_p * diff_p, axis=2)
+            has_prev = np.any(dist_sq_p <= max_dist_sq, axis=1)
+
+        has_next = np.zeros(n_cur, dtype=bool)
+        if next_boxes:
+            n_centers = np.array([[n["center_x"], n["center_y"]] for n in next_boxes], dtype=np.float32)
+            diff_n = cur_centers[:, None, :] - n_centers[None, :, :]
+            dist_sq_n = np.sum(diff_n * diff_n, axis=2)
+            has_next = np.any(dist_sq_n <= max_dist_sq, axis=1)
+
+        gt_matches = [
+            g for g in gt_rows
+            if (g[0] == ws and g[1] == we) or windows_overlap(ws, we, g[0], g[1])
+        ]
+
+        for idx, box in enumerate(boxes):
+            hits = 1 + int(has_prev[idx]) + int(has_next[idx])
+            if min_hits >= 2 and hits < min_hits:
+                continue
+
+            box_copy = dict(box)
+            box_copy["hits"] = hits
+
             feats = extract_candidate_features(
-                b,
+                box_copy,
                 prev_boxes,
                 next_boxes,
                 count_img,
@@ -113,10 +123,10 @@ def extract_sequence_dataset(
             feat_vec = [feats[name] for name in FEATURE_NAMES]
 
             # Determine binary label via IoU >= 0.5
-            cx = float(b["center_x"])
-            cy = float(b["center_y"])
-            bw = float(b["width"])
-            bh = float(b["height"])
+            cx = float(box_copy["center_x"])
+            cy = float(box_copy["center_y"])
+            bw = float(box_copy["width"])
+            bh = float(box_copy["height"])
             box_tuple = (cx, cy, bw, bh)
 
             label = 0
@@ -146,10 +156,13 @@ def train_scorer(
     with open(config_path, "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
 
-    # Locate training ground truth files
-    train_gt_files = sorted(list(dataset_dir.glob("Training/*/*_bb_windows_40ms.txt")))
-    if not train_gt_files:
-        train_gt_files = [f for f in sorted(list(dataset_dir.rglob("*_bb_windows_40ms.txt"))) if "Training" in str(f)]
+    # Locate training ground truth files using scoreboard's split-resolution rule
+    train_gt_files = [
+        f for f in sorted(list(dataset_dir.rglob("*_bb_windows_40ms.txt")))
+        if "Training" in str(f)
+    ]
+    if len(train_gt_files) != 17:
+        raise RuntimeError(f"Expected exactly 17 train sequences, found {len(train_gt_files)}")
 
     print(f"Found {len(train_gt_files)} Training sequences for learned re-scorer training.")
 
@@ -188,11 +201,16 @@ def train_scorer(
             train_y_parts.append(y_seq)
             train_seqs_used.append(seq_name)
 
+    if not train_X_parts:
+        raise RuntimeError("Training set extraction produced 0 samples.")
+    if not val_X_parts:
+        raise RuntimeError("Validation holdout sequences produced 0 samples.")
+
     X_train = np.vstack(train_X_parts)
     y_train = np.concatenate(train_y_parts)
 
-    X_val = np.vstack(val_X_parts) if val_X_parts else X_train[:100]
-    y_val = np.concatenate(val_y_parts) if val_y_parts else y_train[:100]
+    X_val = np.vstack(val_X_parts)
+    y_val = np.concatenate(val_y_parts)
 
     print(f"\nDataset Assembly Complete:")
     print(f"  Train: {X_train.shape[0]} samples ({int(np.sum(y_train))} positive, {X_train.shape[0] - int(np.sum(y_train))} negative)")

@@ -5,11 +5,11 @@ import math
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 import numpy as np
+from tabulate import tabulate
+import yaml
 
-from src.common import WINDOW_US, infer_resolution, load_events, sequence_name_from_npy
+from src.common import infer_resolution, load_events, sequence_name_from_npy
 from src.metrics import iou
-from src.scoreboard import load_gt_file
-from src.static_map import build_static_mask
 
 
 FEATURE_NAMES = [
@@ -49,7 +49,7 @@ def extract_local_bg(
     ox2 = min(w_img, x2 + pad)
     oy2 = min(h_img, y2 + pad)
 
-    outer_area = (ox2 - oy1) * (ox2 - ox1)
+    outer_area = (oy2 - oy1) * (ox2 - ox1)
     inner_area = (y2 - y1) * (x2 - x1)
     ring_area = outer_area - inner_area
 
@@ -161,7 +161,7 @@ def extract_candidate_features(
 
 
 def compute_roc_auc(y_true: np.ndarray, y_score: np.ndarray) -> float:
-    """Compute exact ROC-AUC score without scikit-learn dependency."""
+    """Compute exact binary ROC-AUC score via rank sum."""
     pos = y_score[y_true == 1]
     neg = y_score[y_true == 0]
     n_pos = len(pos)
@@ -176,15 +176,99 @@ def compute_roc_auc(y_true: np.ndarray, y_score: np.ndarray) -> float:
     return float(u_pos / (n_pos * n_neg))
 
 
+def generate_feature_auc_report(dataset_dir: Path, config_path: Path) -> None:
+    """Generate and print feature separability report on train split sequences."""
+    from src.train_scorer import extract_sequence_dataset
+
+    with open(config_path, "r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f)
+
+    train_gt_files = [
+        f for f in sorted(list(dataset_dir.rglob("*_bb_windows_40ms.txt")))
+        if "Training" in str(f)
+    ]
+    if len(train_gt_files) != 17:
+        raise RuntimeError(f"Expected 17 train sequences, found {len(train_gt_files)}")
+
+    sensor_data: Dict[str, Tuple[List[np.ndarray], List[np.ndarray]]] = {
+        "DAVIS": ([], []),
+        "DVX": ([], []),
+        "EVK4": ([], []),
+        "OVERALL": ([], []),
+    }
+
+    for gt_f in train_gt_files:
+        seq_name = gt_f.name.replace("_bb_windows_40ms.txt", "")
+        if "EVK4" in seq_name.upper():
+            sensor = "EVK4"
+        elif "DVX" in seq_name.upper():
+            sensor = "DVX"
+        else:
+            sensor = "DAVIS"
+
+        npy_matches = list(gt_f.parent.glob(f"{seq_name}_labeled_events.npy"))
+        if not npy_matches:
+            npy_matches = list(dataset_dir.rglob(f"{seq_name}_labeled_events.npy"))
+        if not npy_matches:
+            continue
+
+        npy_f = npy_matches[0]
+        X_seq, y_seq, _ = extract_sequence_dataset(npy_f, gt_f, cfg)
+        if len(y_seq) == 0:
+            continue
+
+        sensor_data[sensor][0].append(X_seq)
+        sensor_data[sensor][1].append(y_seq)
+        sensor_data["OVERALL"][0].append(X_seq)
+        sensor_data["OVERALL"][1].append(y_seq)
+
+    print("\n================================================================================")
+    print("  FEATURE DISCRIMINATIVE POWER & SEPARABILITY REPORT (TRAIN SPLIT)")
+    print("================================================================================\n")
+
+    for group in ["EVK4", "DAVIS", "DVX", "OVERALL"]:
+        X_parts, y_parts = sensor_data[group]
+        if not X_parts:
+            print(f"[{group}]: No samples found.\n")
+            continue
+
+        X = np.vstack(X_parts)
+        y = np.concatenate(y_parts)
+        n_pos = int(np.sum(y == 1))
+        n_neg = int(np.sum(y == 0))
+
+        print(f"--- Group: {group} (Positives: {n_pos}, Negatives: {n_neg}) ---")
+        table_rows = []
+        for feat_idx, feat_name in enumerate(FEATURE_NAMES):
+            feat_vals = X[:, feat_idx]
+            pos_vals = feat_vals[y == 1]
+            neg_vals = feat_vals[y == 0]
+
+            mean_pos = float(np.mean(pos_vals)) if len(pos_vals) > 0 else 0.0
+            mean_neg = float(np.mean(neg_vals)) if len(neg_vals) > 0 else 0.0
+            auc = compute_roc_auc(y, feat_vals)
+
+            table_rows.append([feat_name, f"{mean_pos:.4f}", f"{mean_neg:.4f}", f"{auc:.4f}"])
+
+        print(tabulate(table_rows, headers=["Feature", "Mean (Pos)", "Mean (Neg)", "ROC-AUC"], tablefmt="grid"))
+        print()
+
+
 def main() -> None:
     """Report feature distributions and binary AUC separation against ground truth."""
     parser = argparse.ArgumentParser(description="Evaluate feature discriminative power")
     parser.add_argument("--dataset-dir", type=str, default="../OrbitSight_Dataset")
+    parser.add_argument("--config", type=str, default="config.yaml")
     parser.add_argument("--report", action="store_true", help="Generate feature AUC report")
     args = parser.parse_args()
 
     dataset_dir = Path(args.dataset_dir).resolve()
-    print(f"Generating feature discriminative report across dataset: {dataset_dir}...")
+    config_path = Path(args.config).resolve()
+
+    if args.report:
+        generate_feature_auc_report(dataset_dir, config_path)
+    else:
+        print("Specify --report to generate feature AUC report.")
 
 
 if __name__ == "__main__":

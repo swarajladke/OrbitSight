@@ -90,20 +90,18 @@ def run_sequence(
 
     eff = resolve_effective_config(cfg, sensor_name)
 
+    from src.static_map import build_continuous_static_map
+    static_frac_map = build_continuous_static_map(events, width, height, window_us=window_us)
     static_thresh = eff.get("static_thresh", None)
     if static_thresh is not None:
-        from src.static_map import build_static_mask
-
-        static_mask = build_static_mask(
-            events, width, height, window_us=window_us, active_frac_thresh=float(static_thresh)
-        )
+        static_mask = static_frac_map >= float(static_thresh)
         n_supp = int(np.sum(static_mask))
         pct_supp = (n_supp / (width * height)) * 100.0
         print(f"static_mask: {n_supp} pixels suppressed ({pct_supp:.2f}% of frame)", flush=True)
     else:
         static_mask = None
 
-    window_records: List[Tuple[int, int, List[Dict[str, float]]]] = []
+    window_records: List[Tuple[int, int, List[Dict[str, float]], np.ndarray]] = []
     window_count = 0
 
     for w_start, w_end, w_events in iter_windows(events, window_us=window_us):
@@ -120,7 +118,7 @@ def run_sequence(
                     continue
                 filtered_boxes.append(b)
             boxes = filtered_boxes
-        window_records.append((w_start, w_end, boxes))
+        window_records.append((w_start, w_end, boxes, count_img))
         window_count += 1
         if window_count >= max_windows:
             break
@@ -145,10 +143,28 @@ def run_sequence(
     max_dist = max_dist_frac * diagonal
     max_dist_sq = max_dist * max_dist
 
+    # Hoist learned model loading above window loop
+    scorer_mode = str(eff.get("scorer_mode", "weighted")).lower()
+    learned_model = None
+    if scorer_mode == "learned":
+        from pathlib import Path
+        import joblib
+        model_path = Path("models/scorer.joblib")
+        if model_path.exists():
+            try:
+                learned_model = joblib.load(model_path)
+                print(f"learned scorer loaded: {model_path}", flush=True)
+            except Exception as e:
+                print(f"[WARN] Failed to load learned scorer {model_path}: {e}. Falling back to weighted.", flush=True)
+                learned_model = None
+        else:
+            print(f"[WARN] Learned scorer requested but {model_path} not found. Falling back to weighted.", flush=True)
+            learned_model = None
+
     predictions: List[Tuple[int, int, int, int, int, int, float]] = []
 
     for w_idx in range(num_windows):
-        w_start, w_end, boxes = window_records[w_idx]
+        w_start, w_end, boxes, count_img = window_records[w_idx]
         if not boxes:
             continue
 
@@ -174,20 +190,7 @@ def run_sequence(
             dist_sq_n = np.sum(diff_n * diff_n, axis=2)
             has_next = np.any(dist_sq_n <= max_dist_sq, axis=1)
 
-        scorer_mode = str(eff.get("scorer_mode", "weighted")).lower()
         scored_cands: List[Dict[str, float]] = []
-
-        # 1. Vectorized persistence matching & candidate scoring
-        learned_model = None
-        if scorer_mode == "learned":
-            from pathlib import Path
-            import joblib
-            model_path = Path("models/scorer.joblib")
-            if model_path.exists():
-                try:
-                    learned_model = joblib.load(model_path)
-                except Exception:
-                    learned_model = None
 
         if learned_model is not None:
             from src.features import FEATURE_NAMES, extract_candidate_features
@@ -197,17 +200,17 @@ def run_sequence(
                 hits = 1 + int(has_prev[idx]) + int(has_next[idx])
                 if min_hits >= 2 and hits < min_hits:
                     continue
+                box_copy = dict(box)
+                box_copy["hits"] = hits
                 feats = extract_candidate_features(
-                    box,
+                    box_copy,
                     prev_boxes,
                     next_boxes,
                     count_img,
-                    static_frac_map=None,
+                    static_frac_map=static_frac_map,
                 )
                 feat_vec = [feats[name] for name in FEATURE_NAMES]
                 cand_features_list.append(feat_vec)
-                box_copy = dict(box)
-                box_copy["hits"] = hits
                 cand_boxes_list.append(box_copy)
 
             if cand_features_list:
@@ -223,8 +226,9 @@ def run_sequence(
                 if min_hits >= 2 and hits < min_hits:
                     continue
 
-                conf = compute_confidence(box, hits, eff)
                 box_copy = dict(box)
+                box_copy["hits"] = hits
+                conf = compute_confidence(box_copy, hits, eff)
                 box_copy["confidence"] = conf
                 scored_cands.append(box_copy)
 
