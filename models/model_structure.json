@@ -1,0 +1,51 @@
+{
+  "model_type": "HistGradientBoostingClassifier",
+  "hyperparameters": {
+    "max_iter": 150,
+    "max_depth": 6,
+    "learning_rate": 0.08,
+    "min_samples_leaf": 20,
+    "class_weight": "balanced",
+    "random_state": 42
+  },
+  "feature_names": [
+    "events",
+    "density",
+    "area",
+    "extent_w",
+    "extent_h",
+    "aspect",
+    "hits",
+    "disp_prev",
+    "disp_next",
+    "speed",
+    "dir_consistency",
+    "static_frac",
+    "local_bg"
+  ],
+  "train_sequences": [
+    "2025_12_23_21_12_28_EVK4_mag5.2",
+    "DAVIS_COSMOS1933_18958_2024-12-04-18-37-01",
+    "DAVIS_EGS_16908_2024-11-01-19-10-44",
+    "DAVIS_Filtered_NOAA6_11416_2025-01-13-19-51-06",
+    "DAVIS_RESURSDK1_29228_2024-12-04-18-37-01",
+    "DAVIS_SL12RB2_15772_2024-12-04-18-21-37",
+    "DAVIS_SL16RB_20625_2024-12-04-19-34-18",
+    "DAVIS_SL16RB_26070_2024-12-04-19-14-39",
+    "DVX_Filtered_ACS3_59588_2025-01-20-19-35-44",
+    "DVX_Filtered_NOAA15_25338_2025-01-20-19-25-07",
+    "DVX_Filtered_NOAA16_26536_2025-01-20-19-46-50",
+    "DVX_Filtered_NOAA6_11416_2025-01-20-19-11-35",
+    "DVX_Filtered_Stars2_2025-01-20-19-57-17",
+    "DVX_Filtered_Stars_2025-01-20-19-15-10",
+    "DVX_NOAA6_11416_2025-01-20-19-06-31"
+  ],
+  "val_sequences": [
+    "DAVIS_SL8RB_2025-01-13-19-15-36",
+    "DVX_Filtered_BlockDM_SLRB_32405_2025-01-20-19-57-17"
+  ],
+  "metrics": {
+    "train_roc_auc": 0.9984052195524754,
+    "val_roc_auc": 0.9300218096451596
+  }
+}
