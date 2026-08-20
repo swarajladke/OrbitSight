@@ -5,17 +5,71 @@
 [![Real-Time](https://img.shields.io/badge/Latency-15.30ms%2Fwindow-brightgreen.svg)](#inference-latency--real-time-performance)
 [![Scoreboard mAP](https://img.shields.io/badge/mAP%400.5-0.155493-success.svg)](#benchmark-performance)
 
-**OrbitSight** is a high-performance, real-time neuromorphic space domain awareness (SDA) pipeline designed to detect and track low-Earth orbit (LEO) and geostationary satellites and orbital debris from event-based sensors (EVK4, DAVIS240C, and DVXplorer).
+**OrbitSight** is a high-performance, real-time neuromorphic space domain awareness (SDA) pipeline designed to detect and track low-Earth orbit (LEO), medium-Earth orbit (MEO), and geostationary (GEO) satellites and orbital debris using event-based neuromorphic vision sensors (Prophesee EVK4, iniVation DAVIS240C, and DVXplorer).
 
 ---
 
-## 🌟 Key Highlights
+## 🌌 The Challenge: Neuromorphic Space Domain Awareness (SDA)
 
-- **Real-Time Stream Processing**: Processes 40,000 µs (40 ms) event windows in **14.07 – 15.30 ms/window** on average (>2.6× faster than the 40 ms real-time streaming constraint).
-- **Static Background Suppression**: Continuous pixel-activity accumulation suppresses stationary sensor hot pixels and static starfields while maintaining high sensitivity to faint moving targets.
-- **Sensor-Adaptive Morphology & Box Formulation**: Tailored percentile thresholds, structuring elements, and centroiding modes (intensity-weighted vs connected component) calibrated per sensor resolution.
-- **Learned Motion & Geometric Re-Scorer**: Trained gradient-boosted decision trees (`HistGradientBoostingClassifier`) using 13 vectorized kinematic, geometric, and spatial background features.
-- **Massive False Positive Reduction**: Eliminates **159,537 false alarms** on the 17 training sequences compared to the heuristic baseline (172,683 $\to$ 13,146 FPs) while increasing mAP from **0.101145 to 0.155493** (+53.7% relative gain) and F1 from **0.055156 to 0.306052** (+455% relative gain).
+Space Domain Awareness (SDA) is critical for spaceflight safety, collision avoidance, and orbital debris management. Traditional frame-based optical telescopes suffer from motion blur, dynamic range saturation (streaking from stellar backgrounds), high power draw, and blind spots during high-speed satellite transits.
+
+**Event cameras (neuromorphic sensors)** solve this by measuring per-pixel asynchronous brightness changes at microsecond resolution with dynamic ranges $>120\text{ dB}$. However, processing event streams for space surveillance introduces severe algorithmic hurdles:
+1. **Extreme Background Clutter**: Atmospheric turbulence, hot pixels, and optical starfields generate massive amounts of non-target event noise.
+2. **High Target Velocity Variations**: Satellite angular velocities range from sub-pixel drift to tens of pixels per millisecond across diverse sensor fields of view.
+3. **Severe Multi-Sensor Heterogeneity**: Large disparities in sensor spatial resolution ($240\times 180$ to $1280\times 720$), sensitivity, and background noise profiles.
+4. **Hard Real-Time Latency Budgets**: Detections must be produced within streaming window durations without unbounded memory caching or buffering.
+
+---
+
+## 🎯 Technical Requirements & Competition Constraints
+
+| Constraint / Requirement | Specification | Enforcement / Verification |
+|---|---|---|
+| **Temporal Windowing** | Fixed $\Delta t = 40,000\ \mu\text{s}$ ($40\text{ ms}$) non-overlapping slicing windows | `iter_windows(events, window_us=40000)` strictly uses timestamp column `3` |
+| **Real-Time Latency Budget** | $< 40.0\text{ ms}$ processing time per window | End-to-end inference benchmarked at **14.07 – 15.30 ms/window** |
+| **Primary Metric** | Mean Average Precision at $\text{IoU} \ge 0.5$ ($\text{mAP}@0.5$) | Evaluated via authoritative single-source `src.metrics.iou` |
+| **Secondary Metrics** | Precision, Recall, $\text{F}_1$-score, False Positives count | Tracked across all training sequences in `src.scoreboard` |
+| **Sensor Generalization** | EVK4 ($1280\times 720$), DVXplorer ($640\times 480$), DAVIS240C ($240\times 180$) | Adaptive per-sensor morphology & continuous spatial activity maps |
+| **Prediction Format** | Tab-separated `*_pred.txt` with window timestamps, box coordinates, and confidence | Formatted as $(t_{\text{start}}, t_{\text{end}}, c_x, c_y, w, h, \text{confidence})$ |
+| **Container Submission** | Standalone Linux Docker container consuming `/dataset` and writing `/predictions` | Portable Dockerfile with headless OpenCV and model binaries |
+| **Zero Test Contamination** | 17 Training sequences for parameter tuning; 4 Test sequences strictly held out | Strict closed-scope protocol governed by `AGENTS.md` |
+
+---
+
+## 📈 Research & Development Progress
+
+```
+[Phase 1: Baseline Heuristics] ────► [Phase 2: Static Background Map] ────► [Phase 3: Learned Re-Scorer]
+      mAP: 0.101145                        Hot pixel suppression                 Train ROC-AUC: 0.9984
+      FP: 172,683                          Sensor-tailored boxes                 Val ROC-AUC:   0.9300
+                                                    │
+                                                    ▼
+[Phase 5: Vectorized Inference] ◄─── [Phase 4: Operating Point Lock]
+      Latency: 15.30 ms/window             mAP: 0.155493 (+53.7%)
+      Speedup: 1.52x - 6.70x               F1:  0.306052 (+455%)
+      Parity: 21/21 Bit-Identical          FP:  13,146 (-159,537 FPs)
+```
+
+### Phase 1: Baseline Static Filtering & Heuristic Scoring
+- Initial naive connected-component detectors generated **172,683 false positives** across 17 training sequences due to hot pixels and starfields, resulting in low precision ($0.0299$) and mAP ($0.101145$).
+
+### Phase 2: Continuous Background Activity Suppression & Sensor Specialization
+- Built `src/static_map.py` to accumulate continuous pixel event frequencies over sequence timelines. Thresholding at `static_thresh: 0.5` suppressed $>99\%$ of stationary hot pixels without target loss.
+- Calibrated sensor-specific morphology: fixed bounding boxes for EVK4 ($52\times 56$) and DVX ($18\times 18$), and dynamic extent-padded boxes for DAVIS ($10\times 12$).
+
+### Phase 3: Learned Motion & Spatial Re-Scorer
+- Extracted $944,504$ candidate samples ($6,977$ positives, $937,527$ negatives) across the 17 training sequences.
+- Engineered 13 physical, kinematic, and background features. Fit a `HistGradientBoostingClassifier` achieving **0.9984 Train ROC-AUC** and **0.9300 Validation ROC-AUC** (`models/scorer.joblib`).
+
+### Phase 4: Post-Hoc Threshold Optimization & Operating Point Selection
+- Executed multi-dimensional grid sweep over confidence floors ($0.05 \to 0.95$) and Top-$K$ candidate bounds.
+- Locked optimal operating point: `conf_min = 0.30, max_candidates_per_window = 1`.
+- **mAP jumped to `0.155493` (+53.7% relative gain)**, **F1 surged to `0.306052` (+455% gain)**, and **false alarms plunged from 172,683 down to 13,146** (159,537 false alarms eliminated).
+
+### Phase 5: Vectorized Inference Engine & Bit-Level Parity
+- Replaced iterative candidate loops with vectorized float64 distance matrices (`extract_window_features_batch`).
+- Reduced end-to-end inference latency from $26.63\text{ ms}$ to **$14.07 – 15.30\text{ ms/window}$** (up to **$6.70\times$ faster** on complex sequences).
+- Verified bit-for-bit parity across all 21 sequences with zero regressions.
 
 ---
 
@@ -29,16 +83,18 @@ Authoritative scoreboard evaluation across the **17 Training Sequences** (15,292
 | **Learned Baseline** | Learned | `0.05`, `k=2` | 0.154898 | 0.152137 | 0.350248 | 0.212131 | **5,356** | 29,849 | 17.49 ms |
 | **OrbitSight Final (Locked)** | **Learned** | **`0.30`, `k=1`** | **0.155493** | **0.281011** | **0.335993** | **0.306052** | **5,138** | **13,146** | **15.30 ms** |
 
-### Per-Sequence AP@0.5 Highlights
+### Per-Sequence AP@0.5 Comparison
 
-| Target Sequence | Sensor | Ground Truth Boxes | Baseline AP | OrbitSight Final AP | Relative Gain |
-|---|---|---|---|---|---|
-| `2025_12_23_21_12_28_EVK4_mag5.2` | EVK4 | 1,203 | 0.4960 | **0.5966** | **+20.3%** |
-| `DAVIS_EGS_16908_2024-11-01-19-10-44` | DAVIS | 3,140 | 0.3275 | **0.3652** | **+11.5%** |
-| `DVX_Filtered_BlockDM_SLRB_32405` | DVX | 478 | 0.1467 | **0.2241** | **+52.8%** |
-| `DVX_Filtered_Stars2_2025-01-20-19-57-17` | DVX | 9 | 0.0671 | **0.2963** | **+341.6%** |
-| `DAVIS_SL16RB_20625_2024-12-04-19-34-18` | DAVIS | 197 | 0.0222 | **0.1984** | **+793.7%** |
-| `DAVIS_SL12RB2_15772_2024-12-04-18-21-37` | DAVIS | 8 | 0.0714 | **0.1875** | **+162.6%** |
+| Target Sequence | Sensor | Ground Truth Instances | Baseline AP | OrbitSight Final AP | Absolute $\Delta$ | Relative Gain |
+|---|---|---|---|---|---|---|
+| `2025_12_23_21_12_28_EVK4_mag5.2` | EVK4 | 1,203 | 0.4960 | **0.5966** | +0.1006 | **+20.3%** |
+| `DAVIS_EGS_16908_2024-11-01-19-10-44` | DAVIS | 3,140 | 0.3275 | **0.3652** | +0.0377 | **+11.5%** |
+| `DVX_Filtered_BlockDM_SLRB_32405` | DVX | 478 | 0.1467 | **0.2241** | +0.0774 | **+52.8%** |
+| `DVX_Filtered_Stars2_2025-01-20-19-57-17` | DVX | 9 | 0.0671 | **0.2963** | +0.2292 | **+341.6%** |
+| `DAVIS_SL16RB_20625_2024-12-04-19-34-18` | DAVIS | 197 | 0.0222 | **0.1984** | +0.1762 | **+793.7%** |
+| `DAVIS_SL12RB2_15772_2024-12-04-18-21-37` | DAVIS | 8 | 0.0714 | **0.1875** | +0.1161 | **+162.6%** |
+| `DAVIS_SL16RB_26070_2024-12-04-19-14-39` | DAVIS | 10 | 0.1039 | **0.1250** | +0.0211 | **+20.3%** |
+| `DVX_Filtered_Stars_2025-01-20-19-15-10` | DVX | 3,326 | 0.1387 | **0.1870** | +0.0483 | **+34.8%** |
 
 ---
 
@@ -48,33 +104,33 @@ Authoritative scoreboard evaluation across the **17 Training Sequences** (15,292
 flowchart TD
     A["Raw Events Stream (.npy)<br/>[x, y, p, t_us, label, rel_t_us]"] --> B["Window Slicer (40,000 µs)"]
     B --> C["Continuous Static Activity Map"]
-    C --> D["Static Mask Suppression"]
+    C --> D["Static Mask Suppression (static_thresh=0.5)"]
     B --> E["2D Event Count Accumulator"]
     E --> D
-    D --> F["Adaptive Percentile Thresholding & Morphology"]
+    D --> F["Sensor-Adaptive Morphology & Percentile Thresholding"]
     F --> G["Connected Component Extraction & Bounding Boxes"]
-    G --> H["Temporal Neighbor Association (prev / next)"]
+    G --> H["Temporal Neighbor Association (t - Δt, t + Δt)"]
     H --> I["Vectorized 13-D Feature Extraction (float64)"]
-    I --> J["HistGradientBoosting Learned Scorer"]
-    J --> K["Top-K Filtering & Confidence Thresholding"]
-    K --> L["Submission Predictions (*_pred.txt)"]
+    I --> J["HistGradientBoosting Learned Classifier"]
+    J --> K["Top-K Filtering (k=1) & Confidence Floor (0.30)"]
+    K --> L["Final Predictions TSV (*_pred.txt)"]
 ```
 
 ### 13-Dimensional Feature Representation
-For each candidate box, OrbitSight extracts:
-1. `events`: Total event count inside the box.
-2. `density`: Event count normalized by bounding box area.
-3. `area`: Bounding box area ($w \times h$).
+For every candidate bounding box, OrbitSight computes:
+1. `events`: Total event count enclosed within the bounding box.
+2. `density`: Local event density ($\text{events} / \text{area}$).
+3. `area`: Bounding box pixel footprint ($w \times h$).
 4. `extent_w`: Bounding box width.
 5. `extent_h`: Bounding box height.
-6. `aspect`: Aspect ratio $\max(w, h) / \min(w, h)$.
-7. `hits`: Temporal persistence count across previous/next adjacent windows ($1, 2, 3$).
-8. `disp_prev`: Euclidean displacement to nearest candidate in previous window ($t - \Delta t$).
-9. `disp_next`: Euclidean displacement to nearest candidate in next window ($t + \Delta t$).
-10. `speed`: Average displacement $\frac{1}{2}(\text{disp\_prev} + \text{disp\_next})$.
-11. `dir_consistency`: Cosine similarity between forward and backward motion vectors $\cos(\vec{v}_{\text{prev}}, \vec{v}_{\text{next}})$.
-12. `static_frac`: Normalized pixel activity fraction from continuous background map.
-13. `local_bg`: Background event density in a 4-pixel dilated bounding box halo.
+6. `aspect`: Geometric aspect ratio $\max(w, h) / \max(\min(w, h), 1.0)$.
+7. `hits`: Temporal persistence count across adjacent windows ($1, 2, 3$).
+8. `disp_prev`: Distance to nearest candidate in preceding window ($t - \Delta t$).
+9. `disp_next`: Distance to nearest candidate in succeeding window ($t + \Delta t$).
+10. `speed`: Mean candidate displacement $\frac{1}{2}(\text{disp\_prev} + \text{disp\_next})$.
+11. `dir_consistency`: Cosine similarity between trajectory vectors $\cos(\vec{v}_{\text{prev}}, \vec{v}_{\text{next}})$.
+12. `static_frac`: Normalized background activity frequency at box centroid.
+13. `local_bg`: Background event density in a 4-pixel dilated halo surrounding the box.
 
 ---
 
@@ -82,27 +138,27 @@ For each candidate box, OrbitSight extracts:
 
 ```
 OrbitSight_Research/
-├── config.yaml               # Master pipeline hyperparameter configuration
+├── config.yaml               # Master pipeline configuration (per-sensor parameters)
 ├── Dockerfile                # Submission container definition
 ├── run.sh                    # Automated entry point script
-├── requirements.txt          # Python dependency specifications
+├── requirements.txt          # Pinned runtime dependencies
 ├── AGENTS.md                 # Operating protocol & validation rules
 ├── models/
-│   ├── scorer.joblib         # Serialized HistGradientBoosting classifier
-│   └── model_structure.json  # Exported model hyperparameters and feature schema
+│   ├── scorer.joblib         # Serialized HistGradientBoosting model (359 KB)
+│   └── model_structure.json  # Feature schema and hyperparameters
 └── src/
-    ├── common.py             # Event I/O, resolution inference, window iterators
+    ├── common.py             # Event I/O, resolution inference, window slicing
     ├── detector.py           # Morphology, percentile filtering, connected components
-    ├── static_map.py         # Continuous static map and background mask generation
+    ├── static_map.py         # Continuous background activity map generation
     ├── features.py           # Vectorized 13-D candidate feature extraction
-    ├── train_scorer.py       # Scorer training pipeline and validation reporting
-    ├── pipeline.py           # Full sequence end-to-end detection engine
-    ├── infer.py              # Batch CLI inference across dataset directory
-    ├── scoreboard.py         # Authoritative mAP@0.5 metric evaluation suite
+    ├── train_scorer.py       # Classifier training and validation reporting
+    ├── pipeline.py           # Stream processing engine
+    ├── infer.py              # Batch dataset CLI inference
+    ├── scoreboard.py         # Authoritative mAP@0.5 evaluation suite
     ├── filter_preds.py       # Post-hoc confidence and Top-K filter utility
-    ├── metrics.py            # Strict IoU and precision-recall implementations
+    ├── metrics.py            # Strict IoU and precision-recall metrics
     ├── test_feature_parity.py# Bit-level parity test suite for feature extraction
-    └── sweep.py              # Hyperparameter grid sweep engine
+    └── sweep.py              # Detector grid sweep engine
 ```
 
 ---
@@ -116,7 +172,7 @@ OrbitSight_Research/
 git clone https://github.com/swarajladke/OrbitSight.git
 cd OrbitSight/OrbitSight_Research
 
-# Create and activate virtual environment
+# Setup virtual environment
 python -m venv .venv
 # On Linux/macOS:
 source .venv/bin/activate
@@ -151,7 +207,7 @@ python -m src.scoreboard --split train --pred-dir predictions --tag submission-v
 
 ### 4. Train Learned Re-Scorer (Optional)
 
-Extract 13-D features from all training sequences and fit the classifier:
+Train the `HistGradientBoostingClassifier` on the training split:
 
 ```bash
 python -m src.train_scorer --dataset-dir ../OrbitSight_Dataset
@@ -159,9 +215,7 @@ python -m src.train_scorer --dataset-dir ../OrbitSight_Dataset
 
 ---
 
-## ⚙️ Configuration (`config.yaml`)
-
-Per-sensor locked optimal configurations:
+## ⚙️ Locked Configuration (`config.yaml`)
 
 ```yaml
 # Global defaults
@@ -207,7 +261,7 @@ DAVIS:
 
 ---
 
-## 🐳 Docker Deployment
+## 🐳 Docker Submission Container
 
 Build and run the submission container:
 
@@ -215,7 +269,7 @@ Build and run the submission container:
 # Build Docker image
 docker build -t orbitsight:latest .
 
-# Run inference container with mounted dataset and output volumes
+# Run inference with mounted dataset and prediction volumes
 docker run --rm \
   -v /path/to/OrbitSight_Dataset:/dataset:ro \
   -v /path/to/predictions:/predictions:rw \
