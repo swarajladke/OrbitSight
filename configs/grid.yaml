@@ -1,5 +1,5 @@
-percentile: [97.5, 98.5]
-min_events_in_box: [4, 8]
+percentile: [98.0, 99.0, 99.5]
+min_events_in_box: [6, 12, 20]
 open_kernel: [1, 2]
 dilate_kernel: [3]
 min_hits: [2]
@@ -7,16 +7,16 @@ box_mode: ["scale", "fixed"]
 centroid_mode: ["component", "weighted"]
 
 DAVIS:
-  box_scale: [1.1, 1.3]
-  box_pad: [1.5, 3.0]
-  box_w: [8, 10, 12]
-  box_h: [8, 10, 12]
+  box_scale: [1.1, 1.3, 1.5]
+  box_pad: [1.5, 3.0, 4.0]
+  box_w: [8, 10, 14, 18]
+  box_h: [8, 10, 14, 18]
 
 DVX:
-  box_scale: [1.5, 2.0]
-  box_pad: [4.0, 6.0]
-  box_w: [14, 18, 24]
-  box_h: [14, 18, 24]
+  box_scale: [2.0, 2.5, 3.0]
+  box_pad: [4.0, 6.0, 8.0]
+  box_w: [24, 30, 36, 42, 48]
+  box_h: [24, 30, 36, 42, 48]
 
 EVK4:
   box_scale: [3.8, 5.0]

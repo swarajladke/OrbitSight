@@ -96,42 +96,30 @@ def load_grid_config(grid_path: Path) -> Dict[str, Any]:
         return cfg
 
 
-def extract_raw_components(
+def extract_raw_components_fast(
     count_img: np.ndarray,
-    percentile: float,
+    thresh: float,
     open_k: int,
     dilate_k: int,
     width: int,
     height: int,
 ) -> List[Dict[str, float]]:
-    """Extract raw connected component properties from a 2D count image fast."""
-    nonzero_vals = count_img[count_img > 0]
-    num_nonzero = len(nonzero_vals)
-    if num_nonzero < 4:
-        return []
-
-    if num_nonzero > 1000:
-        actual_perc = min(99.0, percentile + (num_nonzero - 1000) / 500.0)
-    else:
-        actual_perc = percentile
-
-    raw_thresh = float(np.percentile(nonzero_vals, actual_perc))
-    thresh = max(1.0, raw_thresh)
-
+    """Extract raw connected component properties given pre-calculated threshold."""
     binary = (count_img >= thresh).astype(np.uint8)
-    if not np.any(binary):
+    if cv2.countNonZero(binary) < 4:
         return []
 
     if open_k > 1:
         kernel_open = cv2.getStructuringElement(cv2.MORPH_RECT, (open_k, open_k))
         binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel_open)
+        if cv2.countNonZero(binary) < 4:
+            return []
 
     if dilate_k > 1:
         kernel_dilate = cv2.getStructuringElement(cv2.MORPH_RECT, (dilate_k, dilate_k))
         binary = cv2.dilate(binary, kernel_dilate)
-
-    if not np.any(binary):
-        return []
+        if cv2.countNonZero(binary) < 4:
+            return []
 
     num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(
         binary, connectivity=8
@@ -150,7 +138,6 @@ def extract_raw_components(
         w_box = int(stats[label_idx, cv2.CC_STAT_WIDTH])
         h_box = int(stats[label_idx, cv2.CC_STAT_HEIGHT])
 
-        # Slice bounding box region for O(box_area) intensity weighting
         sub_img = count_img[y_box : y_box + h_box, x_box : x_box + w_box]
         sub_labels = labels[y_box : y_box + h_box, x_box : x_box + w_box]
         sub_mask = sub_labels == label_idx
@@ -213,11 +200,25 @@ def run_sequence_sweep_cached(
     win_count = 0
     for w_start, w_end, w_events in iter_windows(events, window_us=WINDOW_US):
         count_img, _, _ = event_image(w_events, width, height)
+        nonzero_vals = count_img[count_img > 0]
+        num_nonzero = len(nonzero_vals)
+
+        # Pre-compute thresholds once per percentile for this window
+        thresh_map: Dict[float, float] = {}
+        if num_nonzero >= 4:
+            for perc in percentile_list:
+                actual_perc = min(99.0, perc + (num_nonzero - 1000) / 500.0) if num_nonzero > 1000 else perc
+                thresh_map[perc] = max(1.0, float(np.percentile(nonzero_vals, actual_perc)))
+
         for perc, open_k, dilate_k in thresh_combos:
-            c_list = extract_raw_components(
-                count_img, perc, open_k, dilate_k, width, height
-            )
+            if perc not in thresh_map:
+                c_list = []
+            else:
+                c_list = extract_raw_components_fast(
+                    count_img, thresh_map[perc], open_k, dilate_k, width, height
+                )
             comp_cache[(perc, open_k, dilate_k)].append((w_start, w_end, c_list))
+
         del count_img
         win_count += 1
         if win_count >= max_windows:
