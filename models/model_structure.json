@@ -45,7 +45,7 @@
     "DVX_Filtered_BlockDM_SLRB_32405_2025-01-20-19-57-17"
   ],
   "metrics": {
-    "train_roc_auc": 0.9984052195524754,
-    "val_roc_auc": 0.9300218096451596
+    "train_roc_auc": 0.9978718531533617,
+    "val_roc_auc": 0.9393277177695327
   }
 }
