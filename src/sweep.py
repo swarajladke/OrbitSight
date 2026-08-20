@@ -436,18 +436,378 @@ def main() -> None:
         default=None,
         help="Limit number of windows per sequence for fast sweep test",
     )
+    parser.add_argument(
+        "--geom-search",
+        action="store_true",
+        help="Run Stage 1 geometry ceiling grid search on train split",
+    )
+    parser.add_argument(
+        "--op-sweep",
+        action="store_true",
+        help="Run Stage 4 operating point grid search (conf_min x k) on train split",
+    )
 
     args = parser.parse_args()
 
-    grid_path = Path(args.grid)
-    raw_grid = load_grid_config(grid_path)
-    dataset_dir = Path(args.dataset_dir).resolve()
+    if args.op_sweep:
+        from src.scoreboard import load_yaml_config
+        from src.metrics import evaluate_sequence
+        from src.common import load_events, infer_resolution, sequence_name_from_npy
+        from src.pipeline import run_sequence
+        import joblib
 
-    sensors_to_sweep = (
-        [args.sensor] if args.sensor else ["DAVIS", "DVX", "EVK4"]
-    )
-    sensor_best_configs: Dict[str, Dict[str, Any]] = {}
-    max_w = float("inf") if not args.max_windows else float(args.max_windows)
+        cfg_all = load_yaml_config(Path("config.yaml"))
+        dataset_dir = Path(args.dataset_dir).resolve()
+        gt_files = sorted([f for f in dataset_dir.rglob("*_bb_windows_40ms.txt") if "Training" in str(f)])
+
+        conf_grid = [0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50]
+        k_grid = [1, 2]
+
+        print("\n==========================================================================================")
+        print("  STAGE 4 — OPERATING POINT SWEEP: conf_min in [0.05..0.50] x k in [1, 2] ON TRAIN SPLIT")
+        print("==========================================================================================")
+
+        # First generate raw scored candidate predictions per sequence once
+        # by running run_sequence with conf_min=0.0 and max_candidates_per_window=None
+        from src.train_scorer import load_gt_file
+        seq_cached_raw_preds = {}
+        seq_gt_rows = {}
+
+        for gtf in gt_files:
+            seq_name = gtf.name.replace("_bb_windows_40ms.txt", "")
+            npy_path = list(gtf.parent.glob(f"{seq_name}_labeled_events.npy"))[0]
+            events = load_events(npy_path)
+            width, height = infer_resolution(seq_name, events[:, 0], events[:, 1])
+            seq_gt_rows[seq_name] = load_gt_file(gtf)
+
+            # Run with conf_min=0.0 and max_k=None so all candidates are retained
+            seq_cfg = dict(cfg_all)
+            seq_cfg["conf_min"] = 0.0
+            seq_cfg["max_candidates_per_window"] = None
+            if "EVK4" in seq_cfg:
+                seq_cfg["EVK4"] = dict(seq_cfg["EVK4"])
+                seq_cfg["EVK4"]["conf_min"] = 0.0
+                seq_cfg["EVK4"]["max_candidates_per_window"] = None
+            if "DVX" in seq_cfg:
+                seq_cfg["DVX"] = dict(seq_cfg["DVX"])
+                seq_cfg["DVX"]["conf_min"] = 0.0
+                seq_cfg["DVX"]["max_candidates_per_window"] = None
+            if "DAVIS" in seq_cfg:
+                seq_cfg["DAVIS"] = dict(seq_cfg["DAVIS"])
+                seq_cfg["DAVIS"]["conf_min"] = 0.0
+                seq_cfg["DAVIS"]["max_candidates_per_window"] = None
+
+            print(f"Extracting candidates on train sequence '{seq_name}'...", flush=True)
+            preds, num_windows = run_sequence(events, width, height, seq_cfg)
+            seq_cached_raw_preds[seq_name] = preds
+
+        # Now evaluate all (conf_min, k) combinations instantaneously in memory
+        sweep_results = []
+        for k in k_grid:
+            for c_min in conf_grid:
+                # Group & filter predictions for all 17 train sequences
+                split_seq_metrics = []
+                total_tp, total_fp, total_fn = 0, 0, 0
+
+                for seq_name, raw_preds in seq_cached_raw_preds.items():
+                    # Filter by conf_min and group by window_start
+                    win_preds: Dict[int, List[Tuple[int, int, int, int, int, int, float]]] = {}
+                    for p in raw_preds:
+                        if p[6] >= c_min:
+                            ws = p[0]
+                            if ws not in win_preds:
+                                win_preds[ws] = []
+                            win_preds[ws].append(p)
+
+                    filtered_preds: List[Tuple[int, int, int, int, int, int, float]] = []
+                    for ws, w_list in win_preds.items():
+                        w_list.sort(key=lambda x: x[6], reverse=True)
+                        filtered_preds.extend(w_list[:k])
+
+                    # Sort deterministically
+                    filtered_preds.sort(key=lambda x: (x[0], -x[6]))
+
+                    m = evaluate_sequence(seq_gt_rows[seq_name], filtered_preds)
+
+                    split_seq_metrics.append(m)
+                    total_tp += m["tp"]
+                    total_fp += m["fp"]
+                    total_fn += m["fn"]
+
+                train_map = float(np.mean([m["ap"] for m in split_seq_metrics]))
+                train_p = total_tp / (total_tp + total_fp) if (total_tp + total_fp) > 0 else 0.0
+                train_r = total_tp / (total_tp + total_fn) if (total_tp + total_fn) > 0 else 0.0
+                train_f1 = (2.0 * train_p * train_r) / (train_p + train_r) if (train_p + train_r) > 0 else 0.0
+
+                sweep_results.append({
+                    "k": k,
+                    "conf_min": c_min,
+                    "mAP": train_map,
+                    "Precision": train_p,
+                    "Recall": train_r,
+                    "F1": train_f1,
+                    "TP": total_tp,
+                    "FP": total_fp,
+                    "FN": total_fn,
+                })
+
+        # Sort results by mAP descending (prefer k=1 on ties)
+        sweep_results.sort(key=lambda x: (x["mAP"], -x["k"]), reverse=True)
+
+        print("\n==========================================================================================")
+        print("  STAGE 4 — OPERATING POINT SWEEP RESULTS (TRAIN SPLIT)")
+        print("==========================================================================================")
+        table_rows = []
+        for rank, r in enumerate(sweep_results, 1):
+            table_rows.append([
+                rank,
+                r["k"],
+                f"{r['conf_min']:.2f}",
+                f"{r['mAP']:.6f}",
+                f"{r['Precision']:.6f}",
+                f"{r['Recall']:.6f}",
+                f"{r['F1']:.6f}",
+                r["TP"],
+                r["FP"],
+                r["FN"],
+            ])
+        print(tabulate(table_rows, headers=["Rank", "k", "conf_min", "Train mAP", "Precision", "Recall", "F1", "TP", "FP", "FN"], tablefmt="github"))
+
+        winner = sweep_results[0]
+        print(f"\n[WINNER] Selected Operating Point: k={winner['k']}, conf_min={winner['conf_min']:.2f} (Train mAP: {winner['mAP']:.6f}, F1: {winner['F1']:.6f})")
+        sys.exit(0)
+
+    if args.geom_search:
+        from src.oracle_recall import get_sensor_family
+        from src.common import resolve_effective_config
+        from src.scoreboard import load_yaml_config
+        from src.metrics import iou, cx_cy_wh_to_xyxy
+
+        cfg_all = load_yaml_config(Path("config.yaml"))
+        dataset_dir = Path(args.dataset_dir).resolve()
+        gt_files = sorted([f for f in dataset_dir.rglob("*_bb_windows_40ms.txt") if "Training" in str(f)])
+
+        # Sensor grids defined in prompt
+        grids = {
+            "EVK4": [
+                {"box_mode": "fixed", "box_w": bw, "box_h": bh}
+                for bw in [44, 48, 52, 55, 58, 62]
+                for bh in [42, 46, 50, 54, 58, 62]
+            ],
+            "DVX": [
+                {"box_mode": "fixed", "box_w": bw, "box_h": bh}
+                for bw in [10, 11, 12, 13, 14, 16, 18]
+                for bh in [11, 12, 13, 14, 16, 18]
+            ] + [
+                {"box_mode": "extent", "extent_scale": sc, "extent_pad": pad}
+                for sc in [0.8, 1.0, 1.2, 1.5, 2.0]
+                for pad in [0.0, 1.0, 2.0, 4.0]
+            ],
+            "DAVIS": [
+                {"box_mode": "fixed", "box_w": bw, "box_h": bh}
+                for bw in [7, 8, 9, 10, 12, 14]
+                for bh in [7, 8, 9, 10, 12, 14]
+            ] + [
+                {"box_mode": "extent", "extent_scale": sc, "extent_pad": pad}
+                for sc in [0.8, 1.0, 1.1, 1.4, 1.8]
+                for pad in [0.0, 1.0, 2.0, 3.0]
+            ],
+        }
+
+        # Baseline definitions
+        baseline_configs = {
+            "EVK4": {"box_mode": "fixed", "box_w": 52.0, "box_h": 56.0},
+            "DVX": {"box_mode": "fixed", "box_w": 18.0, "box_h": 18.0},
+            "DAVIS": {"box_mode": "extent", "extent_scale": 1.1, "extent_pad": 2.0, "box_w": 10.0, "box_h": 12.0},
+        }
+
+        from src.oracle_recall import detect_stage_funnel_and_candidates, load_gt_rows
+        from src.static_map import build_continuous_static_map
+
+        print("\n==========================================================================================")
+        print("  STAGE 1 — GEOMETRY GRID SEARCH: CANDIDATE-GENERATION CEILING (S6) ON TRAIN SPLIT")
+        print("==========================================================================================")
+
+        for sensor in ["EVK4", "DVX", "DAVIS"]:
+            sensor_gt_files = [f for f in gt_files if sensor in f.name.upper()]
+            if not sensor_gt_files:
+                continue
+
+            print(f"\n[INFO] Evaluating sensor '{sensor}' across {len(sensor_gt_files)} training sequence(s)...", flush=True)
+
+            # Pre-extract S3 components for all GT windows of this sensor
+            cached_windows = []
+            total_sensor_gt = 0
+
+            for gtf in sensor_gt_files:
+                seq_name = gtf.name.replace("_bb_windows_40ms.txt", "")
+                npy_path = list(gtf.parent.glob(f"{seq_name}_labeled_events.npy"))[0]
+                events = load_events(npy_path)
+                width, height = infer_resolution(seq_name, events[:, 0], events[:, 1])
+                eff_cfg = resolve_effective_config(cfg_all, sensor)
+
+                static_map = build_continuous_static_map(events, width, height, window_us=WINDOW_US)
+                static_mask = static_map >= float(eff_cfg.get("static_thresh", 0.5))
+
+                gt_rows = load_gt_rows(gtf)
+                total_sensor_gt += len(gt_rows)
+                gt_dict = {r[0]: (r[2], r[3], r[4], r[5]) for r in gt_rows}
+
+                for ws, we, w_events in iter_windows(events, window_us=WINDOW_US):
+                    if ws not in gt_dict:
+                        continue
+                    gt_box = gt_dict[ws]
+                    count_img, _, _ = event_image(w_events, width, height, need_polarity=False)
+
+                    # Extract binary & components up to S3 with base morphology
+                    nonzero_vals = count_img[count_img > 0]
+                    num_nonzero = len(nonzero_vals)
+                    if num_nonzero < 4:
+                        cached_windows.append((gt_box, [], count_img, width, height, static_mask, eff_cfg))
+                        continue
+
+                    base_percentile = float(eff_cfg.get("percentile", 97.5))
+                    actual_perc = min(99.0, base_percentile + (num_nonzero - 1000) / 500.0) if num_nonzero > 1000 else base_percentile
+                    thresh = max(1.0, float(np.percentile(nonzero_vals, actual_perc)))
+                    binary = (count_img >= thresh).astype(np.uint8)
+                    if cv2.countNonZero(binary) < 4:
+                        cached_windows.append((gt_box, [], count_img, width, height, static_mask, eff_cfg))
+                        continue
+
+                    open_k = int(eff_cfg.get("open_kernel", 1))
+                    if open_k > 1:
+                        k_open = cv2.getStructuringElement(cv2.MORPH_RECT, (open_k, open_k))
+                        binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, k_open)
+                        if cv2.countNonZero(binary) < 4:
+                            cached_windows.append((gt_box, [], count_img, width, height, static_mask, eff_cfg))
+                            continue
+
+                    dilate_k = int(eff_cfg.get("dilate_kernel", 3))
+                    if dilate_k > 1:
+                        k_dilate = cv2.getStructuringElement(cv2.MORPH_RECT, (dilate_k, dilate_k))
+                        binary = cv2.dilate(binary, k_dilate)
+                        if cv2.countNonZero(binary) < 4:
+                            cached_windows.append((gt_box, [], count_img, width, height, static_mask, eff_cfg))
+                            continue
+
+                    num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(binary, connectivity=8)
+                    if num_labels <= 1:
+                        cached_windows.append((gt_box, [], count_img, width, height, static_mask, eff_cfg))
+                        continue
+
+                    total_pixels = width * height
+                    max_area_pixels = int(total_pixels * float(eff_cfg.get("max_area_frac", 0.05)))
+                    min_dim = int(eff_cfg.get("min_dim", 4))
+                    max_dim = int(eff_cfg.get("max_dim", 60))
+
+                    comps = []
+                    for l_idx in range(1, num_labels):
+                        area = int(stats[l_idx, cv2.CC_STAT_AREA])
+                        x_box = int(stats[l_idx, cv2.CC_STAT_LEFT])
+                        y_box = int(stats[l_idx, cv2.CC_STAT_TOP])
+                        w_box = int(stats[l_idx, cv2.CC_STAT_WIDTH])
+                        h_box = int(stats[l_idx, cv2.CC_STAT_HEIGHT])
+                        if area > max_area_pixels or w_box > max_dim or h_box > max_dim:
+                            sub_img = count_img[y_box : y_box + h_box, x_box : x_box + w_box]
+                            sub_labels = labels[y_box : y_box + h_box, x_box : x_box + w_box]
+                            sub_mask = sub_labels == l_idx
+                            sub_vals = sub_img[sub_mask]
+                            if len(sub_vals) >= 4:
+                                sub_thresh = max(thresh + 1.0, float(np.percentile(sub_vals, 75.0)))
+                                sub_bin = ((sub_img >= sub_thresh) & sub_mask).astype(np.uint8)
+                                if cv2.countNonZero(sub_bin) >= 4:
+                                    n_sub, _, sub_stats, sub_cents = cv2.connectedComponentsWithStats(sub_bin, connectivity=8)
+                                    for s_idx in range(1, n_sub):
+                                        s_area = int(sub_stats[s_idx, cv2.CC_STAT_AREA])
+                                        s_w = int(sub_stats[s_idx, cv2.CC_STAT_WIDTH])
+                                        s_h = int(sub_stats[s_idx, cv2.CC_STAT_HEIGHT])
+                                        if s_area > max_area_pixels or s_w > max_dim or s_h > max_dim:
+                                            continue
+                                        comps.append((
+                                            x_box + int(sub_stats[s_idx, cv2.CC_STAT_LEFT]),
+                                            y_box + int(sub_stats[s_idx, cv2.CC_STAT_TOP]),
+                                            s_w, s_h,
+                                            x_box + float(sub_cents[s_idx, 0]),
+                                            y_box + float(sub_cents[s_idx, 1]),
+                                            l_idx,
+                                        ))
+                        else:
+                            comps.append((
+                                x_box, y_box, w_box, h_box,
+                                float(centroids[l_idx, 0]),
+                                float(centroids[l_idx, 1]),
+                                l_idx,
+                            ))
+
+                    cached_windows.append((gt_box, comps, count_img, width, height, static_mask, eff_cfg))
+
+            # Helper to score a geometry configuration against cached windows
+            def evaluate_geom(geom_cfg):
+                mode = geom_cfg["box_mode"]
+                hits = 0
+                for gt_box, comps, count_img, width, height, static_mask, eff_cfg in cached_windows:
+                    if not comps:
+                        continue
+                    min_events = int(eff_cfg.get("min_events_in_box", 4))
+                    min_dim = int(eff_cfg.get("min_dim", 4))
+                    max_dim = int(eff_cfg.get("max_dim", 60))
+                    centroid_mode = eff_cfg.get("centroid_mode", "weighted")
+
+                    cands = []
+                    for x_b, y_b, w_b, h_b, c_x, c_y, l_idx in comps:
+                        if mode == "fixed":
+                            bw = float(geom_cfg["box_w"])
+                            bh = float(geom_cfg["box_h"])
+                        else:
+                            sc = float(geom_cfg["extent_scale"])
+                            pad = float(geom_cfg["extent_pad"])
+                            bw = max(float(min_dim), min(float(max_dim), w_b * sc + pad))
+                            bh = max(float(min_dim), min(float(max_dim), h_b * sc + pad))
+
+                        # S4: min events in box
+                        x1_box = max(0, min(width - 1, int(round(c_x - (bw - 1.0) / 2.0))))
+                        y1_box = max(0, min(height - 1, int(round(c_y - (bh - 1.0) / 2.0))))
+                        x2_box = max(0, min(width - 1, int(round(x1_box + bw - 1.0))))
+                        y2_box = max(0, min(height - 1, int(round(y1_box + bh - 1.0))))
+                        if int(np.sum(count_img[y1_box : y2_box + 1, x1_box : x2_box + 1])) < min_events:
+                            continue
+
+                        # S5: static mask check
+                        cx_i = int(round(c_x))
+                        cy_i = int(round(c_y))
+                        if 0 <= cy_i < height and 0 <= cx_i < width and static_mask[cy_i, cx_i]:
+                            continue
+
+                        cands.append((c_x, c_y, bw, bh))
+
+                    if any(iou(c, gt_box) >= 0.5 for c in cands):
+                        hits += 1
+
+                return hits / total_sensor_gt if total_sensor_gt > 0 else 0.0
+
+            # Evaluate baseline
+            base_ceil = evaluate_geom(baseline_configs[sensor])
+
+            # Evaluate all grid candidates
+            results = []
+            for g_cfg in grids[sensor]:
+                ceil_val = evaluate_geom(g_cfg)
+                delta = ceil_val - base_ceil
+                results.append((ceil_val, delta, g_cfg))
+
+            results.sort(key=lambda x: x[0], reverse=True)
+
+            print(f"\n--- TOP 5 GEOMETRY CONFIGURATIONS FOR {sensor} (Base Ceil: {base_ceil:.4f}) ---")
+            table_rows = []
+            for rank, (ceil_val, delta, g_cfg) in enumerate(results[:5], 1):
+                if g_cfg["box_mode"] == "fixed":
+                    cfg_str = f"fixed: box_w={g_cfg['box_w']}, box_h={g_cfg['box_h']}"
+                else:
+                    cfg_str = f"extent: scale={g_cfg['extent_scale']}, pad={g_cfg['extent_pad']}"
+                table_rows.append([rank, cfg_str, f"{ceil_val:.4f}", f"{delta:+.4f}"])
+            print(tabulate(table_rows, headers=["Rank", "Configuration", "S6 Ceiling", "Delta vs Base"], tablefmt="github"))
+
+        sys.exit(0)
 
     for sensor in sensors_to_sweep:
         gt_files = sorted(list(dataset_dir.rglob("*_bb_windows_40ms.txt")))
