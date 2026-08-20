@@ -8,8 +8,8 @@ box_mode: "fixed"
 centroid_mode: "weighted"
 max_area_frac: 0.02
 nms_iou: 0.3
-conf_min: 0.05
-max_candidates_per_window: 2
+conf_min: 0.30
+max_candidates_per_window: 1
 max_dist_frac: 0.04
 static_thresh: 0.5
 scorer_mode: "learned"
@@ -31,8 +31,8 @@ EVK4:
   extent_scale: 1.0
   extent_pad: 4.0
   nms_iou: 0.3
-  conf_min: 0.05
-  max_candidates_per_window: 2
+  conf_min: 0.30
+  max_candidates_per_window: 1
 
 DVX:
   percentile: 85.0
@@ -50,8 +50,8 @@ DVX:
   extent_scale: 1.2
   extent_pad: 4.0
   nms_iou: 0.3
-  conf_min: 0.05
-  max_candidates_per_window: 2
+  conf_min: 0.30
+  max_candidates_per_window: 1
 
 DAVIS:
   percentile: 97.0
@@ -69,5 +69,5 @@ DAVIS:
   extent_scale: 1.1
   extent_pad: 2.0
   nms_iou: 0.3
-  conf_min: 0.05
-  max_candidates_per_window: 2
+  conf_min: 0.30
+  max_candidates_per_window: 1
