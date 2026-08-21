@@ -607,6 +607,7 @@ def main():
     parser = argparse.ArgumentParser(description="Multi-window tracker and window objectness reranking.")
     parser.add_argument("--dataset-dir", type=str, default="../OrbitSight_Dataset", help="Path to dataset directory")
     parser.add_argument("--config", type=str, default="config.yaml", help="Path to config.yaml")
+    parser.add_argument("--scorer-model", type=str, default="", help="Path to base candidate scorer model")
     parser.add_argument("--save-preds-dir", type=str, default="", help="Directory to save train predictions of Variant B")
     args = parser.parse_args()
 
@@ -614,8 +615,15 @@ def main():
     cfg = load_yaml_config(cfg_path)
     dataset_dir = Path(args.dataset_dir).resolve()
 
-    learned_scorer = joblib.load("models/scorer.joblib")
-    print(f"[INFO] Loaded baseline learned scorer: models/scorer.joblib")
+    if args.scorer_model:
+        scorer_path = Path(args.scorer_model)
+    elif "pre_geom" in cfg_path.stem and Path("models/scorer_pregeom.joblib").exists():
+        scorer_path = Path("models/scorer_pregeom.joblib")
+    else:
+        scorer_path = Path("models/scorer.joblib")
+
+    learned_scorer = joblib.load(scorer_path)
+    print(f"[INFO] Loaded baseline learned scorer: {scorer_path}", flush=True)
 
     # Find train GT files
     all_gt_files = sorted(list(dataset_dir.rglob("*_bb_windows_40ms.txt")))
@@ -972,32 +980,42 @@ def main():
     print(f"  TEST SPLIT EVALUATION — WINNER: {winner_name}", flush=True)
     print(f"==========================================================================================", flush=True)
 
-    test_gt_files = [f for f in all_gt_files if "Training" not in str(f)]
-    test_seq_data = {}
-    for idx, gt_f in enumerate(test_gt_files, 1):
-        seq_name = gt_f.name.replace("_bb_windows_40ms.txt", "")
-        gt_rows = load_gt_file(gt_f)
-        npy_matches = list(gt_f.parent.glob(f"{seq_name}_labeled_events.npy"))
-        if not npy_matches:
-            npy_matches = list(dataset_dir.rglob(f"{seq_name}_labeled_events.npy"))
-        npy_f = npy_matches[0]
-        events = load_events(npy_f)
-        width, height = infer_resolution(seq_name, events[:, 0], events[:, 1])
+    test_cache_path = Path(f"models/test_seq_extracted_cache_{cfg_path.stem}.joblib")
+    if not test_cache_path.exists() and cfg_path.stem == "config" and Path("models/test_seq_extracted_cache.joblib").exists():
+        test_cache_path = Path("models/test_seq_extracted_cache.joblib")
 
-        t0_test = time.perf_counter()
-        w_cands, full_w_feats, w_times, w_lats = extract_raw_sequence_cands_and_windows(
-            events, width, height, cfg, learned_scorer
-        )
-        dt_test = time.perf_counter() - t0_test
-        print(f"[{idx}/4] Extracted Test '{seq_name}' ({len(w_times)} win, {len(gt_rows)} GT, {dt_test:.1f}s)", flush=True)
+    if test_cache_path.exists():
+        print(f"[INFO] Loading cached test sequence features from {test_cache_path}...", flush=True)
+        test_seq_data = joblib.load(test_cache_path)
+    else:
+        test_gt_files = [f for f in all_gt_files if "Training" not in str(f)]
+        test_seq_data = {}
+        for idx, gt_f in enumerate(test_gt_files, 1):
+            seq_name = gt_f.name.replace("_bb_windows_40ms.txt", "")
+            gt_rows = load_gt_file(gt_f)
+            npy_matches = list(gt_f.parent.glob(f"{seq_name}_labeled_events.npy"))
+            if not npy_matches:
+                npy_matches = list(dataset_dir.rglob(f"{seq_name}_labeled_events.npy"))
+            npy_f = npy_matches[0]
+            events = load_events(npy_f)
+            width, height = infer_resolution(seq_name, events[:, 0], events[:, 1])
 
-        test_seq_data[seq_name] = {
-            "window_cands": w_cands,
-            "full_win_feats": full_w_feats,
-            "window_times": w_times,
-            "win_latencies": w_lats,
-            "gt_rows": gt_rows,
-        }
+            t0_test = time.perf_counter()
+            w_cands, full_w_feats, w_times, w_lats = extract_raw_sequence_cands_and_windows(
+                events, width, height, cfg, learned_scorer
+            )
+            dt_test = time.perf_counter() - t0_test
+            print(f"[{idx}/4] Extracted Test '{seq_name}' ({len(w_times)} win, {len(gt_rows)} GT, {dt_test:.1f}s)", flush=True)
+
+            test_seq_data[seq_name] = {
+                "window_cands": w_cands,
+                "full_win_feats": full_w_feats,
+                "window_times": w_times,
+                "win_latencies": w_lats,
+                "gt_rows": gt_rows,
+            }
+        print(f"[INFO] Saving extracted test features to {test_cache_path}...", flush=True)
+        joblib.dump(test_seq_data, test_cache_path)
 
     test_mode_map = {
         "Baseline (Locked)": ("baseline", None, None),
