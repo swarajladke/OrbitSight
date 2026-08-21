@@ -607,6 +607,7 @@ def main():
     parser = argparse.ArgumentParser(description="Multi-window tracker and window objectness reranking.")
     parser.add_argument("--dataset-dir", type=str, default="../OrbitSight_Dataset", help="Path to dataset directory")
     parser.add_argument("--config", type=str, default="config.yaml", help="Path to config.yaml")
+    parser.add_argument("--save-preds-dir", type=str, default="", help="Directory to save train predictions of Variant B")
     args = parser.parse_args()
 
     cfg_path = Path(args.config)
@@ -622,7 +623,9 @@ def main():
     print(f"[INFO] Found {len(train_gt_files)} training sequence ground truth files.")
 
     # 1. Extract raw candidates and window stats for all 17 train sequences
-    cache_path = Path("models/train_seq_extracted_cache.joblib")
+    cache_path = Path(f"models/train_seq_extracted_cache_{cfg_path.stem}.joblib")
+    if not cache_path.exists() and cfg_path.stem == "config" and Path("models/train_seq_extracted_cache.joblib").exists():
+        cache_path = Path("models/train_seq_extracted_cache.joblib")
     if cache_path.exists():
         print(f"[INFO] Loading cached train sequence features from {cache_path}...", flush=True)
         seq_data_dict = joblib.load(cache_path)
@@ -763,8 +766,16 @@ def main():
     print(f"  VARIANT B: TRAINING WINDOW OBJECTNESS CLASSIFIER ON TRAIN SPLIT")
     print(f"==========================================================================================")
     X_win_tr, y_win_tr, X_win_val, y_win_val = assemble_objectness_dataset(seq_data_dict)
-    print(f"[INFO] Objectness Dataset: Train={X_win_tr.shape[0]} ({np.sum(y_win_tr)} pos / {X_win_tr.shape[0] - np.sum(y_win_tr)} neg, {np.mean(y_win_tr)*100:.1f}% pos)")
-    print(f"[INFO] Objectness Dataset: Val={X_win_val.shape[0]} ({np.sum(y_win_val)} pos / {X_win_val.shape[0] - np.sum(y_win_val)} neg, {np.mean(y_win_val)*100:.1f}% pos)")
+    tr_pos = int(np.sum(y_win_tr))
+    tr_tot = int(X_win_tr.shape[0])
+    tr_base_rate = tr_pos / tr_tot if tr_tot > 0 else 0.0
+
+    val_pos = int(np.sum(y_win_val))
+    val_tot = int(X_win_val.shape[0])
+    val_base_rate = val_pos / val_tot if val_tot > 0 else 0.0
+
+    print(f"[INFO] Objectness Dataset: Train={tr_tot} ({tr_pos} pos / {tr_tot - tr_pos} neg, {tr_base_rate*100:.2f}% pos base rate)")
+    print(f"[INFO] Objectness Dataset: Val={val_tot} ({val_pos} pos / {val_tot - val_pos} neg, {val_base_rate*100:.2f}% pos base rate)")
 
     clf_b = HistGradientBoostingClassifier(
         max_iter=150,
@@ -774,14 +785,21 @@ def main():
         random_state=42,
     )
     clf_b.fit(X_win_tr, y_win_tr)
+    tr_obj_probs = clf_b.predict_proba(X_win_tr)[:, 1]
+    tr_obj_roc = roc_auc_score(y_win_tr, tr_obj_probs)
+    tr_obj_pr = average_precision_score(y_win_tr, tr_obj_probs)
+    tr_pr_ratio = tr_obj_pr / tr_base_rate if tr_base_rate > 0 else 0.0
+
     val_obj_probs = clf_b.predict_proba(X_win_val)[:, 1]
     val_obj_roc = roc_auc_score(y_win_val, val_obj_probs)
     val_obj_pr = average_precision_score(y_win_val, val_obj_probs)
-    print(f"[METRIC] Window Objectness Classifier Validation ROC-AUC: {val_obj_roc:.6f}")
-    print(f"[METRIC] Window Objectness Classifier Validation PR-AUC:  {val_obj_pr:.6f}")
+    val_pr_ratio = val_obj_pr / val_base_rate if val_base_rate > 0 else 0.0
 
-    joblib.dump(clf_b, "models/scorer_objectness.joblib")
-    print(f"[INFO] Saved window objectness classifier to models/scorer_objectness.joblib")
+    print(f"[METRIC] Train Objectness ROC-AUC: {tr_obj_roc:.6f} | PR-AUC: {tr_obj_pr:.6f} (Base Rate: {tr_base_rate:.4f}, Ratio: {tr_pr_ratio:.2f}x trivial)")
+    print(f"[METRIC] Val Objectness   ROC-AUC: {val_obj_roc:.6f} | PR-AUC: {val_obj_pr:.6f} (Base Rate: {val_base_rate:.4f}, Ratio: {val_pr_ratio:.2f}x trivial)")
+
+    joblib.dump(clf_b, f"models/scorer_objectness_{cfg_path.stem}.joblib")
+    print(f"[INFO] Saved window objectness classifier to models/scorer_objectness_{cfg_path.stem}.joblib")
 
     # =========================================================================
     # COMPREHENSIVE COMPARISON: BASELINE vs VARIANT A vs VARIANT B vs VARIANT A+B
@@ -897,6 +915,22 @@ def main():
         headers=["Sequence", "Type", "GT", "Baseline AP", f"Var A (G={best_g})", "Var B (Obj)", "Var A+B"],
         tablefmt="github"
     ))
+
+    # Save predictions of Variant B if requested
+    if args.save_preds_dir:
+        out_pdir = Path(args.save_preds_dir)
+        out_pdir.mkdir(parents=True, exist_ok=True)
+        print(f"\n[INFO] Saving Variant B predictions to {out_pdir}...", flush=True)
+        for seq_name, data in seq_data_dict.items():
+            res, _ = evaluate_variant_on_sequence(
+                data["window_cands"], data["full_win_feats"], data["window_times"], data["gt_rows"],
+                mode="variant_b", reranker_model=None, objectness_model=clf_b, max_gap=best_g, conf_min=0.30, max_k=1
+            )
+            out_file = out_pdir / f"{seq_name}_pred.txt"
+            with open(out_file, "w") as f:
+                for row in res["preds"]:
+                    f.write(f"{row[0]}\t{row[1]}\t{row[2]}\t{row[3]}\t{row[4]}\t{row[5]}\t{row[6]:.4f}\n")
+        print(f"[INFO] Successfully wrote {len(seq_data_dict)} prediction files to {out_pdir}", flush=True)
 
     # =========================================================================
     # LATENCY BENCHMARK PER SEQUENCE
