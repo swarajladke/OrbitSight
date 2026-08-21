@@ -609,6 +609,8 @@ def main():
     parser.add_argument("--config", type=str, default="config.yaml", help="Path to config.yaml")
     parser.add_argument("--scorer-model", type=str, default="", help="Path to base candidate scorer model")
     parser.add_argument("--save-preds-dir", type=str, default="", help="Directory to save train predictions of Variant B")
+    parser.add_argument("--skip-test", action="store_true", help="Suppress test split evaluation")
+    parser.add_argument("--variants", choices=["all", "b"], default="all", help="Variants to evaluate: 'all' or 'b' only")
     args = parser.parse_args()
 
     cfg_path = Path(args.config)
@@ -669,7 +671,6 @@ def main():
                 "gt_rows": gt_rows,
                 "width": width,
                 "height": height,
-                "events": events,
             }
         print(f"[INFO] Saving extracted features to {cache_path}...", flush=True)
         joblib.dump(seq_data_dict, cache_path)
@@ -677,95 +678,99 @@ def main():
     # =========================================================================
     # VARIANT A — G sweep on Train (G in {1, 2, 3, 5})
     # =========================================================================
-    print(f"\n==========================================================================================")
-    print(f"  VARIANT A: SWEEPING GAP TOLERANCE G in {{1, 2, 3, 5}} ON TRAIN SPLIT")
-    print(f"==========================================================================================")
-    best_g = None
-    best_g_map = -1.0
-    g_sweep_results = []
-    trained_rerankers = {}
+    if args.variants == "all":
+        print(f"\n==========================================================================================")
+        print(f"  VARIANT A: SWEEPING GAP TOLERANCE G in {{1, 2, 3, 5}} ON TRAIN SPLIT")
+        print(f"==========================================================================================")
+        best_g = None
+        best_g_prauc = -1.0
+        g_sweep_results = []
+        trained_rerankers = {}
 
-    for g_val in [1, 2, 3, 5]:
-        X_tr, y_tr, X_val, y_val, n_singles, single_scores = assemble_track_dataset(seq_data_dict, max_gap=g_val)
-        print(f"\n[G={g_val}] Assembled Track Dataset: Train={X_tr.shape[0]} ({np.sum(y_tr)} pos), Val={X_val.shape[0]} ({np.sum(y_val)} pos), Singletons={n_singles}")
+        for g_val in [1, 2, 3, 5]:
+            X_tr, y_tr, X_val, y_val, n_singles, single_scores = assemble_track_dataset(seq_data_dict, max_gap=g_val)
+            print(f"\n[G={g_val}] Assembled Track Dataset: Train={X_tr.shape[0]} ({np.sum(y_tr)} pos), Val={X_val.shape[0]} ({np.sum(y_val)} pos), Singletons={n_singles}")
 
-        clf_a = HistGradientBoostingClassifier(
-            max_iter=150,
-            learning_rate=0.08,
-            max_leaf_nodes=31,
-            min_samples_leaf=20,
-            random_state=42,
-        )
-        clf_a.fit(X_tr, y_tr)
-        val_auc = roc_auc_score(y_val, clf_a.predict_proba(X_val)[:, 1])
-        val_pr_auc = average_precision_score(y_val, clf_a.predict_proba(X_val)[:, 1])
-        trained_rerankers[g_val] = clf_a
-
-        # Evaluate across all 17 train sequences
-        seq_aps = []
-        sparse_aps = []
-        dense_aps = []
-        tot_tp, tot_fp, tot_fn = 0, 0, 0
-
-        for seq_name, data in seq_data_dict.items():
-            res, _ = evaluate_variant_on_sequence(
-                data["window_cands"], data["full_win_feats"], data["window_times"], data["gt_rows"],
-                mode="variant_a", reranker_model=clf_a, max_gap=g_val, conf_min=0.30, max_k=1
+            clf_a = HistGradientBoostingClassifier(
+                max_iter=150,
+                learning_rate=0.08,
+                max_leaf_nodes=31,
+                min_samples_leaf=20,
+                random_state=42,
             )
-            seq_aps.append(res["ap"])
-            if len(data["gt_rows"]) <= 43:
-                sparse_aps.append(res["ap"])
-            else:
-                dense_aps.append(res["ap"])
-            tot_tp += res["tp"]
-            tot_fp += res["fp"]
-            tot_fn += res["fn"]
+            clf_a.fit(X_tr, y_tr)
+            val_auc = roc_auc_score(y_val, clf_a.predict_proba(X_val)[:, 1])
+            val_pr_auc = average_precision_score(y_val, clf_a.predict_proba(X_val)[:, 1])
+            trained_rerankers[g_val] = clf_a
 
-        mean_map = float(np.mean(seq_aps))
-        sparse_map = float(np.mean(sparse_aps))
-        dense_map = float(np.mean(dense_aps))
-        p, r, f1 = compute_prf1(tot_tp, tot_fp, tot_fn)
+            # Evaluate across all 17 train sequences
+            seq_aps = []
+            sparse_aps = []
+            dense_aps = []
+            tot_tp, tot_fp, tot_fn = 0, 0, 0
 
-        g_sweep_results.append({
-            "G": g_val,
-            "Val ROC-AUC": val_auc,
-            "Val PR-AUC": val_pr_auc,
-            "Train mAP": mean_map,
-            "Sparse mAP": sparse_map,
-            "Dense mAP": dense_map,
-            "Precision": p,
-            "Recall": r,
-            "F1": f1,
-            "TP": tot_tp,
-            "FP": tot_fp,
-            "FN": tot_fn,
-            "Singletons": n_singles,
-            "Mean Single Score": float(np.mean(single_scores)) if single_scores else 0.0,
-        })
+            for seq_name, data in seq_data_dict.items():
+                res, _ = evaluate_variant_on_sequence(
+                    data["window_cands"], data["full_win_feats"], data["window_times"], data["gt_rows"],
+                    mode="variant_a", reranker_model=clf_a, max_gap=g_val, conf_min=0.30, max_k=1
+                )
+                seq_aps.append(res["ap"])
+                if len(data["gt_rows"]) <= 43:
+                    sparse_aps.append(res["ap"])
+                else:
+                    dense_aps.append(res["ap"])
+                tot_tp += res["tp"]
+                tot_fp += res["fp"]
+                tot_fn += res["fn"]
 
-        if sparse_map > best_g_map:
-            best_g_map = sparse_map
-            best_g = g_val
+            mean_map = float(np.mean(seq_aps))
+            sparse_map = float(np.mean(sparse_aps))
+            dense_map = float(np.mean(dense_aps))
+            p, r, f1 = compute_prf1(tot_tp, tot_fp, tot_fn)
 
-    g_table = [
-        [
-            r["G"], f"{r['Val ROC-AUC']:.4f}", f"{r['Val PR-AUC']:.4f}",
-            f"{r['Train mAP']:.6f}", f"{r['Sparse mAP']:.6f}", f"{r['Dense mAP']:.6f}",
-            f"{r['Precision']:.4f}", f"{r['Recall']:.4f}", f"{r['F1']:.4f}",
-            r["TP"], r["FP"], r["Singletons"], f"{r['Mean Single Score']:.4f}"
+            g_sweep_results.append({
+                "G": g_val,
+                "Val ROC-AUC": val_auc,
+                "Val PR-AUC": val_pr_auc,
+                "Train mAP": mean_map,
+                "Sparse mAP": sparse_map,
+                "Dense mAP": dense_map,
+                "Precision": p,
+                "Recall": r,
+                "F1": f1,
+                "TP": tot_tp,
+                "FP": tot_fp,
+                "FN": tot_fn,
+                "Singletons": n_singles,
+                "Mean Single Score": float(np.mean(single_scores)) if single_scores else 0.0,
+            })
+
+            if val_pr_auc > best_g_prauc:
+                best_g_prauc = val_pr_auc
+                best_g = g_val
+
+        g_table = [
+            [
+                r["G"], f"{r['Val ROC-AUC']:.4f}", f"{r['Val PR-AUC']:.4f}",
+                f"{r['Train mAP']:.6f}", f"{r['Sparse mAP']:.6f}", f"{r['Dense mAP']:.6f}",
+                f"{r['Precision']:.4f}", f"{r['Recall']:.4f}", f"{r['F1']:.4f}",
+                r["TP"], r["FP"], r["Singletons"], f"{r['Mean Single Score']:.4f}"
+            ]
+            for r in g_sweep_results
         ]
-        for r in g_sweep_results
-    ]
-    print(tabulate(
-        g_table,
-        headers=["G", "Val AUC", "Val PR-AUC", "Train mAP", "Sparse mAP", "Dense mAP", "Prec", "Rec", "F1", "TP", "FP", "Singles", "Single Score"],
-        tablefmt="github"
-    ))
+        print(tabulate(
+            g_table,
+            headers=["G", "Val AUC", "Val PR-AUC", "Train mAP", "Sparse mAP", "Dense mAP", "Prec", "Rec", "F1", "TP", "FP", "Singles", "Single Score"],
+            tablefmt="github"
+        ))
 
-    print(f"\n[WINNER G] Selected best G={best_g} (Sparse mAP: {best_g_map:.6f})")
-    best_reranker = trained_rerankers[best_g]
-    joblib.dump(best_reranker, "models/reranker_track.joblib")
-    print(f"[INFO] Saved winning track reranker to models/reranker_track.joblib")
+        print(f"\n[WINNER G] Selected best G={best_g} (Val PR-AUC: {best_g_prauc:.4f})")
+        best_reranker = trained_rerankers[best_g]
+        joblib.dump(best_reranker, "models/reranker_track.joblib")
+        print(f"[INFO] Saved winning track reranker to models/reranker_track.joblib")
+    else:
+        best_g = 3
+        best_reranker = None
 
     # =========================================================================
     # VARIANT B — Window Objectness Gate
@@ -816,12 +821,18 @@ def main():
     print(f"  COMPREHENSIVE VARIANT EVALUATION (17 TRAIN SEQUENCES)")
     print(f"==========================================================================================")
 
-    variants = [
-        ("Baseline (Locked)", "baseline", None, None),
-        (f"Variant A (Track G={best_g})", "variant_a", best_reranker, None),
-        ("Variant B (Window Objectness)", "variant_b", None, clf_b),
-        (f"Variant A+B (Track G={best_g} + Obj)", "variant_ab", best_reranker, clf_b),
-    ]
+    if args.variants == "b":
+        variants = [
+            ("Baseline (Locked)", "baseline", None, None),
+            ("Variant B (Window Objectness)", "variant_b", None, clf_b),
+        ]
+    else:
+        variants = [
+            ("Baseline (Locked)", "baseline", None, None),
+            (f"Variant A (Track G={best_g})", "variant_a", best_reranker, None),
+            ("Variant B (Window Objectness)", "variant_b", None, clf_b),
+            (f"Variant A+B (Track G={best_g} + Obj)", "variant_ab", best_reranker, clf_b),
+        ]
 
     variant_summary = []
     detailed_seq_reports = {}
@@ -907,35 +918,53 @@ def main():
     print(f"  PER-SEQUENCE AP@0.5 BREAKDOWN (17 TRAIN SEQUENCES)")
     print(f"==========================================================================================")
     per_seq_table = []
-    for i, seq_name in enumerate(seq_data_dict.keys()):
-        gt_cnt = len(seq_data_dict[seq_name]["gt_rows"])
-        is_sp = "SPARSE" if gt_cnt <= 43 else "DENSE"
-        b_ap = detailed_seq_reports["Baseline (Locked)"][i]["ap"]
-        a_ap = detailed_seq_reports[f"Variant A (Track G={best_g})"][i]["ap"]
-        b_var_ap = detailed_seq_reports["Variant B (Window Objectness)"][i]["ap"]
-        ab_ap = detailed_seq_reports[f"Variant A+B (Track G={best_g} + Obj)"][i]["ap"]
-        per_seq_table.append([
-            seq_name, is_sp, gt_cnt,
-            f"{b_ap:.4f}", f"{a_ap:.4f}", f"{b_var_ap:.4f}", f"{ab_ap:.4f}"
-        ])
-    print(tabulate(
-        per_seq_table,
-        headers=["Sequence", "Type", "GT", "Baseline AP", f"Var A (G={best_g})", "Var B (Obj)", "Var A+B"],
-        tablefmt="github"
-    ))
+    if args.variants == "b":
+        for i, seq_name in enumerate(seq_data_dict.keys()):
+            gt_cnt = len(seq_data_dict[seq_name]["gt_rows"])
+            is_sp = "SPARSE" if gt_cnt <= 43 else "DENSE"
+            b_ap = detailed_seq_reports["Baseline (Locked)"][i]["ap"]
+            b_var_ap = detailed_seq_reports["Variant B (Window Objectness)"][i]["ap"]
+            per_seq_table.append([
+                seq_name, is_sp, gt_cnt,
+                f"{b_ap:.4f}", f"{b_var_ap:.4f}"
+            ])
+        print(tabulate(
+            per_seq_table,
+            headers=["Sequence", "Type", "GT", "Baseline AP", "Var B (Obj)"],
+            tablefmt="github"
+        ))
+    else:
+        for i, seq_name in enumerate(seq_data_dict.keys()):
+            gt_cnt = len(seq_data_dict[seq_name]["gt_rows"])
+            is_sp = "SPARSE" if gt_cnt <= 43 else "DENSE"
+            b_ap = detailed_seq_reports["Baseline (Locked)"][i]["ap"]
+            a_ap = detailed_seq_reports[f"Variant A (Track G={best_g})"][i]["ap"]
+            b_var_ap = detailed_seq_reports["Variant B (Window Objectness)"][i]["ap"]
+            ab_ap = detailed_seq_reports[f"Variant A+B (Track G={best_g} + Obj)"][i]["ap"]
+            per_seq_table.append([
+                seq_name, is_sp, gt_cnt,
+                f"{b_ap:.4f}", f"{a_ap:.4f}", f"{b_var_ap:.4f}", f"{ab_ap:.4f}"
+            ])
+        print(tabulate(
+            per_seq_table,
+            headers=["Sequence", "Type", "GT", "Baseline AP", f"Var A (G={best_g})", "Var B (Obj)", "Var A+B"],
+            tablefmt="github"
+        ))
 
     # Save predictions of Variant B if requested
     if args.save_preds_dir:
         out_pdir = Path(args.save_preds_dir)
         out_pdir.mkdir(parents=True, exist_ok=True)
         print(f"\n[INFO] Saving Variant B predictions to {out_pdir}...", flush=True)
+        header_line = "window_start_timestamp_us\twindow_end_timestamp_us\tcenter_x\tcenter_y\twidth\theight\tconfidence\n"
         for seq_name, data in seq_data_dict.items():
             res, _ = evaluate_variant_on_sequence(
                 data["window_cands"], data["full_win_feats"], data["window_times"], data["gt_rows"],
                 mode="variant_b", reranker_model=None, objectness_model=clf_b, max_gap=best_g, conf_min=0.30, max_k=1
             )
             out_file = out_pdir / f"{seq_name}_pred.txt"
-            with open(out_file, "w") as f:
+            with open(out_file, "w", encoding="utf-8", newline="\n") as f:
+                f.write(header_line)
                 for row in res["preds"]:
                     f.write(f"{row[0]}\t{row[1]}\t{row[2]}\t{row[3]}\t{row[4]}\t{row[5]}\t{row[6]:.4f}\n")
         print(f"[INFO] Successfully wrote {len(seq_data_dict)} prediction files to {out_pdir}", flush=True)
@@ -944,8 +973,9 @@ def main():
     # LATENCY BENCHMARK PER SEQUENCE
     # =========================================================================
     print(f"\n==========================================================================================", flush=True)
-    print(f"  LATENCY BENCHMARK (TOTAL PIPELINE + BEST VARIANT, PER SEQUENCE)", flush=True)
+    print(f"  DETECTION-STAGE LATENCY (EXCLUDES SCORING AND RERANKING)", flush=True)
     print(f"==========================================================================================", flush=True)
+    print(f"[INFO] Note: These figures are a LOWER BOUND on end-to-end latency (detection stage only). Cached runs reproduce identical latency values rather than independent samples.\n", flush=True)
     latency_table = []
     any_exceed_40 = False
 
@@ -971,96 +1001,97 @@ def main():
     print(f"\n[LATENCY VERDICT] Any sequence exceeds 40ms/win: {any_exceed_40}", flush=True)
 
     # =========================================================================
-    # TEST SPLIT EVALUATION OF BEST VARIANT
+    # TEST SPLIT EVALUATION OF BEST VARIANT (OPTIONAL)
     # =========================================================================
-    # Pick winner by Sparse mAP
-    best_variant_row = max(variant_summary, key=lambda x: x["Sparse mAP (10)"])
-    winner_name = best_variant_row["Variant"]
-    print(f"\n==========================================================================================", flush=True)
-    print(f"  TEST SPLIT EVALUATION — WINNER: {winner_name}", flush=True)
-    print(f"==========================================================================================", flush=True)
+    if not args.skip_test:
+        # Pick winner by Train mAP
+        best_variant_row = max(variant_summary, key=lambda x: x["Train mAP"])
+        winner_name = best_variant_row["Variant"]
+        print(f"\n==========================================================================================", flush=True)
+        print(f"  TEST SPLIT EVALUATION — WINNER: {winner_name}", flush=True)
+        print(f"==========================================================================================", flush=True)
 
-    test_cache_path = Path(f"models/test_seq_extracted_cache_{cfg_path.stem}.joblib")
-    if not test_cache_path.exists() and cfg_path.stem == "config" and Path("models/test_seq_extracted_cache.joblib").exists():
-        test_cache_path = Path("models/test_seq_extracted_cache.joblib")
+        test_cache_path = Path(f"models/test_seq_extracted_cache_{cfg_path.stem}.joblib")
+        if not test_cache_path.exists() and cfg_path.stem == "config" and Path("models/test_seq_extracted_cache.joblib").exists():
+            test_cache_path = Path("models/test_seq_extracted_cache.joblib")
 
-    if test_cache_path.exists():
-        print(f"[INFO] Loading cached test sequence features from {test_cache_path}...", flush=True)
-        test_seq_data = joblib.load(test_cache_path)
-    else:
-        test_gt_files = [f for f in all_gt_files if "Training" not in str(f)]
-        test_seq_data = {}
-        for idx, gt_f in enumerate(test_gt_files, 1):
-            seq_name = gt_f.name.replace("_bb_windows_40ms.txt", "")
-            gt_rows = load_gt_file(gt_f)
-            npy_matches = list(gt_f.parent.glob(f"{seq_name}_labeled_events.npy"))
-            if not npy_matches:
-                npy_matches = list(dataset_dir.rglob(f"{seq_name}_labeled_events.npy"))
-            npy_f = npy_matches[0]
-            events = load_events(npy_f)
-            width, height = infer_resolution(seq_name, events[:, 0], events[:, 1])
+        if test_cache_path.exists():
+            print(f"[INFO] Loading cached test sequence features from {test_cache_path}...", flush=True)
+            test_seq_data = joblib.load(test_cache_path)
+        else:
+            test_gt_files = [f for f in all_gt_files if "Training" not in str(f)]
+            test_seq_data = {}
+            for idx, gt_f in enumerate(test_gt_files, 1):
+                seq_name = gt_f.name.replace("_bb_windows_40ms.txt", "")
+                gt_rows = load_gt_file(gt_f)
+                npy_matches = list(gt_f.parent.glob(f"{seq_name}_labeled_events.npy"))
+                if not npy_matches:
+                    npy_matches = list(dataset_dir.rglob(f"{seq_name}_labeled_events.npy"))
+                npy_f = npy_matches[0]
+                events = load_events(npy_f)
+                width, height = infer_resolution(seq_name, events[:, 0], events[:, 1])
 
-            t0_test = time.perf_counter()
-            w_cands, full_w_feats, w_times, w_lats = extract_raw_sequence_cands_and_windows(
-                events, width, height, cfg, learned_scorer
+                t0_test = time.perf_counter()
+                w_cands, full_w_feats, w_times, w_lats = extract_raw_sequence_cands_and_windows(
+                    events, width, height, cfg, learned_scorer
+                )
+                dt_test = time.perf_counter() - t0_test
+                print(f"[{idx}/4] Extracted Test '{seq_name}' ({len(w_times)} win, {len(gt_rows)} GT, {dt_test:.1f}s)", flush=True)
+
+                test_seq_data[seq_name] = {
+                    "window_cands": w_cands,
+                    "full_win_feats": full_w_feats,
+                    "window_times": w_times,
+                    "win_latencies": w_lats,
+                    "gt_rows": gt_rows,
+                }
+            print(f"[INFO] Saving extracted test features to {test_cache_path}...", flush=True)
+            joblib.dump(test_seq_data, test_cache_path)
+
+        test_mode_map = {
+            "Baseline (Locked)": ("baseline", None, None),
+            f"Variant A (Track G={best_g})": ("variant_a", best_reranker, None),
+            "Variant B (Window Objectness)": ("variant_b", None, clf_b),
+            f"Variant A+B (Track G={best_g} + Obj)": ("variant_ab", best_reranker, clf_b),
+        }
+
+        t_mode, t_rmod, t_omod = test_mode_map[winner_name]
+        test_aps = []
+        tot_tp, tot_fp, tot_fn = 0, 0, 0
+        test_per_seq = []
+
+        for seq_name, data in test_seq_data.items():
+            res, ms_per_win = evaluate_variant_on_sequence(
+                data["window_cands"], data["full_win_feats"], data["window_times"], data["gt_rows"],
+                mode=t_mode, reranker_model=t_rmod, objectness_model=t_omod, max_gap=best_g, conf_min=0.30, max_k=1
             )
-            dt_test = time.perf_counter() - t0_test
-            print(f"[{idx}/4] Extracted Test '{seq_name}' ({len(w_times)} win, {len(gt_rows)} GT, {dt_test:.1f}s)", flush=True)
+            test_aps.append(res["ap"])
+            tot_tp += res["tp"]
+            tot_fp += res["fp"]
+            tot_fn += res["fn"]
+            test_per_seq.append([
+                seq_name, len(data["gt_rows"]), res["n_pred"], f"{res['precision']:.4f}", f"{res['recall']:.4f}", f"{res['f1']:.4f}", f"{res['ap']:.4f}", f"{ms_per_win:.2f}"
+            ])
 
-            test_seq_data[seq_name] = {
-                "window_cands": w_cands,
-                "full_win_feats": full_w_feats,
-                "window_times": w_times,
-                "win_latencies": w_lats,
-                "gt_rows": gt_rows,
-            }
-        print(f"[INFO] Saving extracted test features to {test_cache_path}...", flush=True)
-        joblib.dump(test_seq_data, test_cache_path)
+        test_map = float(np.mean(test_aps))
+        t_p, t_r, t_f1 = compute_prf1(tot_tp, tot_fp, tot_fn)
 
-    test_mode_map = {
-        "Baseline (Locked)": ("baseline", None, None),
-        f"Variant A (Track G={best_g})": ("variant_a", best_reranker, None),
-        "Variant B (Window Objectness)": ("variant_b", None, clf_b),
-        f"Variant A+B (Track G={best_g} + Obj)": ("variant_ab", best_reranker, clf_b),
-    }
+        print(f"\nTEST SPLIT OVERALL METRICS ({winner_name}):")
+        test_summary_table = [[
+            f"{test_map:.6f}", f"{t_p:.6f}", f"{t_r:.6f}", f"{t_f1:.6f}", tot_tp, tot_fp, tot_fn
+        ]]
+        print(tabulate(
+            test_summary_table,
+            headers=["Test mAP", "Precision", "Recall", "F1", "TP", "FP", "FN"],
+            tablefmt="github"
+        ))
 
-    t_mode, t_rmod, t_omod = test_mode_map[winner_name]
-    test_aps = []
-    tot_tp, tot_fp, tot_fn = 0, 0, 0
-    test_per_seq = []
-
-    for seq_name, data in test_seq_data.items():
-        res, ms_per_win = evaluate_variant_on_sequence(
-            data["window_cands"], data["full_win_feats"], data["window_times"], data["gt_rows"],
-            mode=t_mode, reranker_model=t_rmod, objectness_model=t_omod, max_gap=best_g, conf_min=0.30, max_k=1
-        )
-        test_aps.append(res["ap"])
-        tot_tp += res["tp"]
-        tot_fp += res["fp"]
-        tot_fn += res["fn"]
-        test_per_seq.append([
-            seq_name, len(data["gt_rows"]), res["n_pred"], f"{res['precision']:.4f}", f"{res['recall']:.4f}", f"{res['f1']:.4f}", f"{res['ap']:.4f}", f"{ms_per_win:.2f}"
-        ])
-
-    test_map = float(np.mean(test_aps))
-    t_p, t_r, t_f1 = compute_prf1(tot_tp, tot_fp, tot_fn)
-
-    print(f"\nTEST SPLIT OVERALL METRICS ({winner_name}):")
-    test_summary_table = [[
-        f"{test_map:.6f}", f"{t_p:.6f}", f"{t_r:.6f}", f"{t_f1:.6f}", tot_tp, tot_fp, tot_fn
-    ]]
-    print(tabulate(
-        test_summary_table,
-        headers=["Test mAP", "Precision", "Recall", "F1", "TP", "FP", "FN"],
-        tablefmt="github"
-    ))
-
-    print(f"\nTEST SPLIT PER-SEQUENCE BREAKDOWN:")
-    print(tabulate(
-        test_per_seq,
-        headers=["Sequence", "GT", "Preds", "Precision", "Recall", "F1", "AP@0.5", "ms/win"],
-        tablefmt="github"
-    ))
+        print(f"\nTEST SPLIT PER-SEQUENCE BREAKDOWN:")
+        print(tabulate(
+            test_per_seq,
+            headers=["Sequence", "GT", "Preds", "Precision", "Recall", "F1", "AP@0.5", "ms/win"],
+            tablefmt="github"
+        ))
 
 
 if __name__ == "__main__":
