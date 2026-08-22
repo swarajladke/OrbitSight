@@ -1,28 +1,84 @@
 {
-  "model_type": "HistGradientBoostingClassifier",
-  "hyperparameters": {
-    "max_iter": 150,
-    "max_depth": 6,
-    "learning_rate": 0.08,
-    "min_samples_leaf": 20,
-    "class_weight": "balanced",
-    "random_state": 42
+  "submission_models": {
+    "candidate_scorer": {
+      "filename": "models/scorer_pregeom.joblib",
+      "model_type": "HistGradientBoostingClassifier",
+      "hyperparameters": {
+        "max_iter": 150,
+        "max_depth": 6,
+        "learning_rate": 0.08,
+        "min_samples_leaf": 20,
+        "class_weight": "balanced",
+        "random_state": 42
+      },
+      "feature_count": 13,
+      "feature_names": [
+        "events",
+        "density",
+        "area",
+        "extent_w",
+        "extent_h",
+        "aspect",
+        "hits",
+        "disp_prev",
+        "disp_next",
+        "speed",
+        "dir_consistency",
+        "static_frac",
+        "local_bg"
+      ],
+      "train_sample_count": 944504,
+      "train_positive_count": 6977,
+      "val_roc_auc": 0.9300
+    },
+    "window_objectness_gate": {
+      "filename": "models/scorer_objectness_pre_geometry.joblib",
+      "model_type": "HistGradientBoostingClassifier",
+      "hyperparameters": {
+        "max_iter": 150,
+        "learning_rate": 0.08,
+        "max_leaf_nodes": 31,
+        "min_samples_leaf": 20,
+        "random_state": 42
+      },
+      "feature_count": 21,
+      "feature_names": [
+        "win_total_events",
+        "win_num_components",
+        "win_x_std",
+        "win_y_std",
+        "win_max_comp_events",
+        "win_cand_score_mean",
+        "win_cand_score_max",
+        "prev_win_total_events",
+        "prev_win_num_components",
+        "prev_win_x_std",
+        "prev_win_y_std",
+        "prev_win_max_comp_events",
+        "prev_win_cand_score_mean",
+        "prev_win_cand_score_max",
+        "next_win_total_events",
+        "next_win_num_components",
+        "next_win_x_std",
+        "next_win_y_std",
+        "next_win_max_comp_events",
+        "next_win_cand_score_mean",
+        "next_win_cand_score_max"
+      ],
+      "train_sample_count": 96079,
+      "train_positive_count": 9207,
+      "train_positive_rate": 0.0958,
+      "val_sample_count": 10113,
+      "val_positive_count": 6083,
+      "val_positive_rate": 0.6015,
+      "metrics": {
+        "train_roc_auc": 0.980861,
+        "train_pr_auc": 0.910293,
+        "val_roc_auc": 0.888987,
+        "val_pr_auc": 0.921458
+      }
+    }
   },
-  "feature_names": [
-    "events",
-    "density",
-    "area",
-    "extent_w",
-    "extent_h",
-    "aspect",
-    "hits",
-    "disp_prev",
-    "disp_next",
-    "speed",
-    "dir_consistency",
-    "static_frac",
-    "local_bg"
-  ],
   "train_sequences": [
     "2025_12_23_21_12_28_EVK4_mag5.2",
     "DAVIS_COSMOS1933_18958_2024-12-04-18-37-01",
@@ -43,9 +99,5 @@
   "val_sequences": [
     "DAVIS_SL8RB_2025-01-13-19-15-36",
     "DVX_Filtered_BlockDM_SLRB_32405_2025-01-20-19-57-17"
-  ],
-  "metrics": {
-    "train_roc_auc": 0.9978718531533617,
-    "val_roc_auc": 0.9393277177695327
-  }
+  ]
 }

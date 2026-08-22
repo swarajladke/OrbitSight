@@ -121,16 +121,22 @@ def process_sequence(
             flush=True,
         )
 
-    output_lines: List[str] = [
-        "window_start_timestamp_us\twindow_end_timestamp_us\tcenter_x\tcenter_y\twidth\theight\tconfidence"
-    ]
+    header_line = "sequence_id\twindow_start_timestamp_us\twindow_end_timestamp_us\tcenter_x\tcenter_y\twidth\theight\tclass_id\tconfidence"
+    output_lines: List[str] = [header_line]
 
     for ws, we, cx, cy, bw, bh, conf in predictions:
-        output_lines.append(f"{ws}\t{we}\t{cx}\t{cy}\t{bw}\t{bh}\t{conf:.4f}")
+        output_lines.append(f"{seq_name}\t{ws}\t{we}\t{cx}\t{cy}\t{bw}\t{bh}\t0\t{conf:.4f}")
 
-    output_path = output_dir / f"{seq_name}_pred.txt"
-    with open(output_path, "w", encoding="utf-8") as f:
-        f.write("\n".join(output_lines) + "\n")
+    content = "\n".join(output_lines) + "\n"
+
+    target_files = [
+        output_dir / f"{seq_name}.txt",
+        output_dir / f"{seq_name}_pred.txt",
+        output_dir / f"{seq_name}_bb_windows_40ms.txt",
+    ]
+    for out_p in target_files:
+        with open(out_p, "w", encoding="utf-8", newline="\n") as f:
+            f.write(content)
 
     elapsed_ms = (time.perf_counter() - start_time) * 1000.0
     return elapsed_ms, num_windows

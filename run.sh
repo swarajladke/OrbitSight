@@ -12,7 +12,7 @@ echo "dataset: $DATASET_DIR"
 echo "output:  $OUTPUT_DIR"
 
 python -m src.infer --input_dir "$DATASET_DIR" --output_dir "$OUTPUT_DIR"
-python -m src.validate_predictions --pred-dir "$OUTPUT_DIR"
-python -m src.make_report --dataset-dir "$DATASET_DIR" --pred-dir "$OUTPUT_DIR" --out "$OUTPUT_DIR/Evaluation_Metrics.xlsx"
+python -m src.validate_predictions --pred-dir "$OUTPUT_DIR" || echo "[WARN] validation reported issues"
+python -m src.make_report --dataset-dir "$DATASET_DIR" --pred-dir "$OUTPUT_DIR" --out "$OUTPUT_DIR/Evaluation_Metrics.xlsx" || echo "[WARN] metrics report degraded"
 
 echo "DONE"

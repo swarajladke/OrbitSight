@@ -25,6 +25,14 @@ def write_metrics_xlsx(
     ws = wb.active
     ws.title = "Evaluation_Metrics"
 
+    header_note = overall_row.get("note", "")
+    if header_note:
+        ws.append([header_note])
+        ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=10)
+        note_cell = ws.cell(row=1, column=1)
+        note_cell.font = Font(name="Calibri", size=10, italic=True, color="595959")
+        note_cell.alignment = Alignment(horizontal="left", vertical="center")
+
     headers = [
         "Sequence",
         "Split",
@@ -38,6 +46,7 @@ def write_metrics_xlsx(
         "AP@IoU0.5",
     ]
     ws.append(headers)
+    header_row_idx = ws.max_row
 
     header_font = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
     header_fill = PatternFill(start_color="1F497D", end_color="1F497D", fill_type="solid")
@@ -53,7 +62,7 @@ def write_metrics_xlsx(
     )
 
     for col_idx in range(1, len(headers) + 1):
-        cell = ws.cell(row=1, column=col_idx)
+        cell = ws.cell(row=header_row_idx, column=col_idx)
         cell.font = header_font
         cell.fill = header_fill
         cell.alignment = center_align
@@ -63,13 +72,13 @@ def write_metrics_xlsx(
             str(row_data.get("sequence", "")),
             str(row_data.get("split", "")),
             str(row_data.get("sensor", "")),
-            int(row_data.get("tp", 0)),
-            int(row_data.get("fp", 0)),
-            int(row_data.get("fn", 0)),
-            float(row_data.get("precision", 0.0)),
-            float(row_data.get("recall", 0.0)),
-            float(row_data.get("f1", 0.0)),
-            float(row_data.get("ap", 0.0)),
+            row_data.get("tp") if row_data.get("tp") is not None else "",
+            row_data.get("fp") if row_data.get("fp") is not None else "",
+            row_data.get("fn") if row_data.get("fn") is not None else "",
+            row_data.get("precision") if row_data.get("precision") is not None else "",
+            row_data.get("recall") if row_data.get("recall") is not None else "",
+            row_data.get("f1") if row_data.get("f1") is not None else "",
+            row_data.get("ap") if row_data.get("ap") is not None else "",
         ]
         ws.append(row_vals)
 
@@ -83,22 +92,24 @@ def write_metrics_xlsx(
                 c.alignment = center_align
             elif c_idx in (4, 5, 6):
                 c.alignment = right_align
-                c.number_format = "#,##0"
+                if isinstance(c.value, (int, float)):
+                    c.number_format = "#,##0"
             else:
                 c.alignment = right_align
-                c.number_format = "0.000000"
+                if isinstance(c.value, (int, float)):
+                    c.number_format = "0.000000"
 
     overall_vals = [
         "OVERALL",
         str(overall_row.get("split", "all")),
         "ALL",
-        int(overall_row.get("tp", 0)),
-        int(overall_row.get("fp", 0)),
-        int(overall_row.get("fn", 0)),
-        float(overall_row.get("precision", 0.0)),
-        float(overall_row.get("recall", 0.0)),
-        float(overall_row.get("f1", 0.0)),
-        float(overall_row.get("mAP", overall_row.get("ap", 0.0))),
+        overall_row.get("tp") if overall_row.get("tp") is not None else "",
+        overall_row.get("fp") if overall_row.get("fp") is not None else "",
+        overall_row.get("fn") if overall_row.get("fn") is not None else "",
+        overall_row.get("precision") if overall_row.get("precision") is not None else "",
+        overall_row.get("recall") if overall_row.get("recall") is not None else "",
+        overall_row.get("f1") if overall_row.get("f1") is not None else "",
+        overall_row.get("mAP", overall_row.get("ap")) if overall_row.get("mAP", overall_row.get("ap")) is not None else "",
     ]
     ws.append(overall_vals)
     curr_row = ws.max_row
@@ -117,10 +128,12 @@ def write_metrics_xlsx(
             c.alignment = center_align
         elif c_idx in (4, 5, 6):
             c.alignment = right_align
-            c.number_format = "#,##0"
+            if isinstance(c.value, (int, float)):
+                c.number_format = "#,##0"
         else:
             c.alignment = right_align
-            c.number_format = "0.000000"
+            if isinstance(c.value, (int, float)):
+                c.number_format = "0.000000"
 
     # Auto-fit column widths
     for col in ws.columns:
