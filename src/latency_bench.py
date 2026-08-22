@@ -13,6 +13,7 @@ Reports Mean, p50, p95, p99, and Max latency across multiple independent repetit
 """
 
 import argparse
+import math
 from pathlib import Path
 import time
 from typing import Any, Dict, List, Tuple
