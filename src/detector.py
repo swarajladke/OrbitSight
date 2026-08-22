@@ -132,8 +132,11 @@ def detect_boxes(
     nms_iou_val = eff.get("nms_iou", 0.3)
     max_comp = int(eff.get("max_components_per_window", 2000))
 
-    # Component list after component splitting
-    final_components: List[Tuple[float, float, float, float, int]] = []
+    # Vectorized per-label event summation across all connected components
+    label_event_sums = np.bincount(labels.ravel(), weights=count_img.ravel(), minlength=num_labels)
+
+    # Component candidate list: (x_box, y_box, w_box, h_box, label_idx, comp_events, is_split, l_sub_info)
+    candidate_components: List[Tuple[float, float, float, float, int, float, bool, Any]] = []
 
     for label_idx in range(1, num_labels):
         comp_area = float(stats[label_idx, cv2.CC_STAT_AREA])
@@ -155,36 +158,49 @@ def detect_boxes(
                 n_sub, l_sub, s_sub, _ = cv2.connectedComponentsWithStats(
                     sub_binary, connectivity=8
                 )
-
-                for sub_i in range(1, n_sub):
-                    sub_area = float(s_sub[sub_i, cv2.CC_STAT_AREA])
-                    if sub_area <= max_area_pixels:
-                        sx = x_box + int(s_sub[sub_i, cv2.CC_STAT_LEFT])
-                        sy = y_box + int(s_sub[sub_i, cv2.CC_STAT_TOP])
-                        sw = int(s_sub[sub_i, cv2.CC_STAT_WIDTH])
-                        sh = int(s_sub[sub_i, cv2.CC_STAT_HEIGHT])
-                        final_components.append((float(sx), float(sy), float(sw), float(sh), sub_i))
+                if n_sub > 1:
+                    sub_counts = np.bincount(l_sub.ravel(), weights=sub_count.ravel(), minlength=n_sub)
+                    for sub_i in range(1, n_sub):
+                        sub_events = float(sub_counts[sub_i])
+                        if sub_events < min_events:
+                            continue
+                        sub_area = float(s_sub[sub_i, cv2.CC_STAT_AREA])
+                        if sub_area <= max_area_pixels:
+                            sx = x_box + int(s_sub[sub_i, cv2.CC_STAT_LEFT])
+                            sy = y_box + int(s_sub[sub_i, cv2.CC_STAT_TOP])
+                            sw = int(s_sub[sub_i, cv2.CC_STAT_WIDTH])
+                            sh = int(s_sub[sub_i, cv2.CC_STAT_HEIGHT])
+                            candidate_components.append((float(sx), float(sy), float(sw), float(sh), sub_i, sub_events, True, (l_sub, s_sub, x_box, y_box)))
             continue
 
-        final_components.append((float(x_box), float(y_box), float(w_box), float(h_box), label_idx))
+        comp_events = float(label_event_sums[label_idx])
+        if comp_events >= min_events:
+            candidate_components.append((float(x_box), float(y_box), float(w_box), float(h_box), label_idx, comp_events, False, None))
+
+    if not candidate_components:
+        return []
+
+    # Sort surviving components by event count descending and truncate before centroid computation
+    candidate_components.sort(key=lambda c: c[5], reverse=True)
+    if len(candidate_components) > max_comp:
+        candidate_components = candidate_components[:max_comp]
 
     results: List[Dict[str, float]] = []
 
-    for x_box, y_box, w_box, h_box, label_idx in final_components:
+    for x_box, y_box, w_box, h_box, label_idx, comp_events, is_split, split_info in candidate_components:
         x_int, y_int = int(x_box), int(y_box)
         w_int, h_int = int(w_box), int(h_box)
 
         sub_img = count_img[y_int : y_int + h_int, x_int : x_int + w_int]
-        sub_labels = labels[y_int : y_int + h_int, x_int : x_int + w_int]
-        sub_mask = sub_labels == label_idx
-
-        if sub_mask.any():
-            comp_events = float(sub_img[sub_mask].sum())
+        if is_split and split_info is not None:
+            l_sub, s_sub, parent_x, parent_y = split_info
+            rel_x = x_int - parent_x
+            rel_y = y_int - parent_y
+            sub_labels = l_sub[rel_y : rel_y + h_int, rel_x : rel_x + w_int]
+            sub_mask = sub_labels == label_idx
         else:
-            comp_events = float(sub_img.sum())
-
-        if comp_events < min_events:
-            continue
+            sub_labels = labels[y_int : y_int + h_int, x_int : x_int + w_int]
+            sub_mask = sub_labels == label_idx
 
         center_comp_x = x_box + w_box / 2.0
         center_comp_y = y_box + h_box / 2.0

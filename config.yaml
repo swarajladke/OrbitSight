@@ -12,6 +12,7 @@ max_area_frac: 0.02
 nms_iou: 0.3
 conf_min: 0.30
 max_candidates_per_window: 1
+max_components_per_window: 64
 max_dist_frac: 0.04
 static_thresh: 0.5
 scorer_mode: "learned"
