@@ -81,12 +81,21 @@ def run_sequence(
         Tuple of (prediction_rows, num_windows_processed).
         Each prediction row: (w_start, w_end, center_x, center_y, width, height, confidence).
     """
-    if width >= 1200:
+    known_sensors = {
+        "EVK4": (1280, 720, float(np.hypot(1280, 720))),
+        "DVX": (640, 480, float(np.hypot(640, 480))),
+        "DAVIS": (346, 260, float(np.hypot(346, 260))),
+    }
+    curr_diag = float(np.hypot(width, height))
+
+    if width == 1280 and height == 720:
         sensor_name = "EVK4"
-    elif width >= 600:
+    elif width == 640 and height == 480:
         sensor_name = "DVX"
-    else:
+    elif width == 346 and height == 260:
         sensor_name = "DAVIS"
+    else:
+        sensor_name = min(known_sensors.keys(), key=lambda k: abs(curr_diag - known_sensors[k][2]))
 
     eff = resolve_effective_config(cfg, sensor_name)
 
@@ -104,6 +113,7 @@ def run_sequence(
     from src.features import extract_local_bg
 
     window_records: List[Tuple[int, int, List[Dict[str, float]]]] = []
+    base_window_stats: List[Dict[str, float]] = []
     window_count = 0
 
     for w_start, w_end, w_events in iter_windows(events, window_us=window_us):
@@ -121,11 +131,29 @@ def run_sequence(
                 filtered_boxes.append(b)
             boxes = filtered_boxes
 
-        # Precompute candidate local_bg while count_img is live in CPU cache (avoids caching gigabytes of 2D images)
+        # Precompute candidate local_bg while count_img is live in CPU cache
         for b in boxes:
             b["local_bg"] = extract_local_bg(
                 count_img, float(b["center_x"]), float(b["center_y"]), float(b["width"]), float(b["height"])
             )
+
+        # Base window stats for objectness gate (computed from all w_events and filtered boxes)
+        tot_ev = float(len(w_events))
+        n_comp = float(len(boxes))
+        if tot_ev > 0:
+            x_std = float(np.std(w_events[:, 0]))
+            y_std = float(np.std(w_events[:, 1]))
+        else:
+            x_std, y_std = 0.0, 0.0
+        max_comp_ev = float(max([b.get("events", 0.0) for b in boxes])) if boxes else 0.0
+
+        base_window_stats.append({
+            "win_total_events": tot_ev,
+            "win_num_components": n_comp,
+            "win_x_std": x_std,
+            "win_y_std": y_std,
+            "win_max_comp_events": max_comp_ev,
+        })
 
         window_records.append((w_start, w_end, boxes))
         window_count += 1
@@ -152,29 +180,42 @@ def run_sequence(
     max_dist = max_dist_frac * diagonal
     max_dist_sq = max_dist * max_dist
 
-    # Hoist learned model loading above window loop
+    # Load candidate scorer model (raise if missing when scorer_mode == "learned")
     scorer_mode = str(eff.get("scorer_mode", "weighted")).lower()
     learned_model = None
     if scorer_mode == "learned":
         from pathlib import Path
         import joblib
-        model_path = Path("models/scorer.joblib")
-        if model_path.exists():
-            try:
-                learned_model = joblib.load(model_path)
-                print(f"learned scorer loaded: {model_path}", flush=True)
-            except Exception as e:
-                print(f"[WARN] Failed to load learned scorer {model_path}: {e}. Falling back to weighted.", flush=True)
-                learned_model = None
-        else:
-            print(f"[WARN] Learned scorer requested but {model_path} not found. Falling back to weighted.", flush=True)
-            learned_model = None
+        scorer_path_str = eff.get("scorer_path", "models/scorer.joblib")
+        scorer_path = Path(scorer_path_str)
+        if not scorer_path.exists():
+            raise FileNotFoundError(f"Learned candidate scorer model not found: {scorer_path}")
+        learned_model = joblib.load(scorer_path)
+        print(f"learned scorer loaded: {scorer_path}", flush=True)
 
-    predictions: List[Tuple[int, int, int, int, int, int, float]] = []
+    # Load window objectness model if objectness_mode == "gate"
+    objectness_mode = str(eff.get("objectness_mode", "off")).lower()
+    objectness_model = None
+    if objectness_mode == "gate":
+        from pathlib import Path
+        import joblib
+        obj_path_str = eff.get("objectness_path", "models/scorer_objectness_pre_geometry.joblib")
+        obj_path = Path(obj_path_str)
+        if not obj_path.exists():
+            if Path("models/scorer_objectness.joblib").exists():
+                obj_path = Path("models/scorer_objectness.joblib")
+            else:
+                raise FileNotFoundError(f"Window objectness model not found: {obj_path}")
+        objectness_model = joblib.load(obj_path)
+        print(f"window objectness model loaded: {obj_path}", flush=True)
+
+    # Pass 2: Persistence matching and candidate scoring
+    window_candidates: List[List[Dict[str, Any]]] = []
 
     for w_idx in range(num_windows):
         w_start, w_end, boxes = window_records[w_idx]
         if not boxes:
+            window_candidates.append([])
             continue
 
         prev_boxes = window_records[w_idx - 1][2] if w_idx > 0 else []
@@ -199,21 +240,19 @@ def run_sequence(
             dist_sq_n = np.sum(diff_n * diff_n, axis=2)
             has_next = np.any(dist_sq_n <= max_dist_sq, axis=1)
 
-        scored_cands: List[Dict[str, float]] = []
+        cand_boxes_list: List[Dict[str, float]] = []
 
-        if learned_model is not None:
-            from src.features import FEATURE_NAMES, extract_window_features_batch
-            cand_boxes_list = []
-            for idx, box in enumerate(boxes):
-                hits = 1 + int(has_prev[idx]) + int(has_next[idx])
-                if min_hits >= 2 and hits < min_hits:
-                    continue
-                box_copy = dict(box)
-                box_copy["hits"] = hits
-                assert "local_bg" in box_copy and box_copy["local_bg"] is not None, "Missing precomputed local_bg"
-                cand_boxes_list.append(box_copy)
+        for idx, box in enumerate(boxes):
+            hits = 1 + int(has_prev[idx]) + int(has_next[idx])
+            if min_hits >= 2 and hits < min_hits:
+                continue
+            box_copy = dict(box)
+            box_copy["hits"] = hits
+            cand_boxes_list.append(box_copy)
 
-            if cand_boxes_list:
+        if cand_boxes_list:
+            if learned_model is not None:
+                from src.features import FEATURE_NAMES, extract_window_features_batch
                 batch_feats = extract_window_features_batch(
                     cand_boxes_list,
                     prev_boxes,
@@ -228,45 +267,78 @@ def run_sequence(
                 probs = learned_model.predict_proba(X_cand)[:, 1]
                 for b_copy, p_score in zip(cand_boxes_list, probs):
                     b_copy["confidence"] = float(p_score)
-                    scored_cands.append(b_copy)
-        else:
-            for idx, box in enumerate(boxes):
-                hits = 1 + int(has_prev[idx]) + int(has_next[idx])
+            else:
+                for b_copy in cand_boxes_list:
+                    b_copy["confidence"] = compute_confidence(b_copy, int(b_copy["hits"]), eff)
 
-                if min_hits >= 2 and hits < min_hits:
-                    continue
+        window_candidates.append(cand_boxes_list)
 
-                box_copy = dict(box)
-                box_copy["hits"] = hits
-                conf = compute_confidence(box_copy, hits, eff)
-                box_copy["confidence"] = conf
-                scored_cands.append(box_copy)
+    # Pass 3: Window Objectness Gating
+    if objectness_mode == "gate" and objectness_model is not None:
+        window_features_21: List[Dict[str, float]] = []
+        for w_idx in range(num_windows):
+            cands = window_candidates[w_idx]
+            scores = [c["confidence"] for c in cands] if cands else []
+            c_mean = float(np.mean(scores)) if scores else 0.0
+            c_max = float(np.max(scores)) if scores else 0.0
 
-        if not scored_cands:
+            base_stat = dict(base_window_stats[w_idx])
+            base_stat["win_cand_score_mean"] = c_mean
+            base_stat["win_cand_score_max"] = c_max
+            window_features_21.append(base_stat)
+
+        X_win_list = []
+        for w_idx in range(num_windows):
+            cur = window_features_21[w_idx]
+            prev = window_features_21[w_idx - 1] if w_idx > 0 else {k: 0.0 for k in cur}
+            nxt = window_features_21[w_idx + 1] if w_idx < num_windows - 1 else {k: 0.0 for k in cur}
+
+            w_vec = [
+                cur["win_total_events"], cur["win_num_components"], cur["win_x_std"], cur["win_y_std"], cur["win_max_comp_events"], cur["win_cand_score_mean"], cur["win_cand_score_max"],
+                prev["win_total_events"], prev["win_num_components"], prev["win_x_std"], prev["win_y_std"], prev["win_max_comp_events"], prev["win_cand_score_mean"], prev["win_cand_score_max"],
+                nxt["win_total_events"], nxt["win_num_components"], nxt["win_x_std"], nxt["win_y_std"], nxt["win_max_comp_events"], nxt["win_cand_score_mean"], nxt["win_cand_score_max"],
+            ]
+            X_win_list.append(w_vec)
+
+        if X_win_list:
+            X_win = np.array(X_win_list, dtype=np.float32)
+            win_probs = objectness_model.predict_proba(X_win)[:, 1]
+            for w_idx in range(num_windows):
+                p_obj = float(win_probs[w_idx])
+                for c in window_candidates[w_idx]:
+                    c["confidence"] = float(c["confidence"]) * p_obj
+
+    # Pass 4: NMS, confidence filtering, top-K, and prediction assembly
+    predictions: List[Tuple[int, int, int, int, int, int, float]] = []
+
+    for w_idx in range(num_windows):
+        w_start, w_end, _ = window_records[w_idx]
+        cands = window_candidates[w_idx]
+        if not cands:
             continue
 
-        # 2. Pipeline-stage NMS using weighted confidence score
+        # Pipeline NMS
         if nms_stage == "pipeline" and nms_iou_val is not None:
             try:
                 nms_thresh = float(nms_iou_val)
-                scored_cands = apply_nms(scored_cands, nms_thresh)
+                cands = apply_nms(cands, nms_thresh)
             except (TypeError, ValueError):
                 pass
 
-        # 3. Confidence threshold filtering
+        # Confidence threshold filtering
         if conf_min > 0.0:
-            scored_cands = [b for b in scored_cands if b["confidence"] >= conf_min]
+            cands = [b for b in cands if b["confidence"] >= conf_min]
 
-        if not scored_cands:
+        if not cands:
             continue
 
-        # 4. Top-K window candidate truncation
-        if max_k is not None and max_k > 0 and len(scored_cands) > max_k:
-            scored_cands.sort(key=lambda b: b["confidence"], reverse=True)
-            scored_cands = scored_cands[:max_k]
+        # Top-K candidate truncation
+        if max_k is not None and max_k > 0 and len(cands) > max_k:
+            cands.sort(key=lambda b: b["confidence"], reverse=True)
+            cands = cands[:max_k]
 
-        # 5. Output coordinate and confidence rounding
-        for b in scored_cands:
+        # Rounding into final prediction format
+        for b in cands:
             cx = int(round(b["center_x"]))
             cy = int(round(b["center_y"]))
             bw = int(round(b["width"]))

@@ -27,24 +27,54 @@ def detect_boxes(
     if num_nonzero < 4:
         return []
 
-    # Determine sensor family
-    if width >= 1200:
+    # Known sensor reference diagonals (width x height)
+    # EVK4: 1280x720, DVX: 640x480, DAVIS: 346x260
+    known_sensors = {
+        "EVK4": (1280, 720, float(np.hypot(1280, 720)), (52.0, 56.0), (20.0, 80.0), (3.8, 10.0)),
+        "DVX": (640, 480, float(np.hypot(640, 480)), (18.0, 18.0), (12.0, 60.0), (1.5, 4.0)),
+        "DAVIS": (346, 260, float(np.hypot(346, 260)), (10.0, 12.0), (4.0, 30.0), (1.1, 1.5)),
+    }
+
+    curr_diag = float(np.hypot(width, height))
+
+    # Exact known resolution match check first
+    if width == 1280 and height == 720:
         sensor_name = "EVK4"
-        def_scale, def_pad = 3.8, 10.0
-        def_bw, def_bh = 52.0, 56.0
-        def_min_dim, def_max_dim = 20.0, 80.0
-    elif width >= 600:
+        diag_scale = 1.0
+    elif width == 640 and height == 480:
         sensor_name = "DVX"
-        def_scale, def_pad = 1.5, 4.0
-        def_bw, def_bh = 18.0, 18.0
-        def_min_dim, def_max_dim = 12.0, 60.0
-    else:
+        diag_scale = 1.0
+    elif width == 346 and height == 260:
         sensor_name = "DAVIS"
-        def_scale, def_pad = 1.1, 1.5
-        def_bw, def_bh = 10.0, 12.0
-        def_min_dim, def_max_dim = 4.0, 30.0
+        diag_scale = 1.0
+    else:
+        # Unknown sensor: choose nearest sensor by diagonal distance and scale box geometry
+        sensor_name = min(known_sensors.keys(), key=lambda k: abs(curr_diag - known_sensors[k][2]))
+        ref_diag = known_sensors[sensor_name][2]
+        diag_scale = curr_diag / ref_diag
+
+    _, _, _, (ref_bw, ref_bh), (ref_min_d, ref_max_d), (ref_sc, ref_pad) = known_sensors[sensor_name]
+    def_bw = ref_bw * diag_scale
+    def_bh = ref_bh * diag_scale
+    def_min_dim = ref_min_d * diag_scale
+    def_max_dim = ref_max_d * diag_scale
+    def_scale, def_pad = ref_sc, ref_pad
 
     eff = resolve_effective_config(cfg, sensor_name)
+    if diag_scale != 1.0:
+        eff = eff.copy()
+        if "box_w" in eff:
+            eff["box_w"] = float(eff["box_w"]) * diag_scale
+        else:
+            eff["box_w"] = def_bw
+        if "box_h" in eff:
+            eff["box_h"] = float(eff["box_h"]) * diag_scale
+        else:
+            eff["box_h"] = def_bh
+        if "min_dim" in eff:
+            eff["min_dim"] = float(eff["min_dim"]) * diag_scale
+        if "max_dim" in eff:
+            eff["max_dim"] = float(eff["max_dim"]) * diag_scale
 
     base_percentile = float(eff.get("percentile", 97.5))
 

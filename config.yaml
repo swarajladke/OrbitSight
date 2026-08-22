@@ -1,4 +1,4 @@
-# Global baseline defaults
+# Global baseline defaults (Cell d Final Shipping Configuration)
 percentile: 97.5
 min_events_in_box: 6
 open_kernel: 2
@@ -6,6 +6,8 @@ dilate_kernel: 3
 min_hits: 2
 box_mode: "fixed"
 centroid_mode: "weighted"
+box_w: 18
+box_h: 18
 max_area_frac: 0.02
 nms_iou: 0.3
 conf_min: 0.30
@@ -13,9 +15,12 @@ max_candidates_per_window: 1
 max_dist_frac: 0.04
 static_thresh: 0.5
 scorer_mode: "learned"
+scorer_path: "models/scorer_pregeom.joblib"
+objectness_mode: "gate"
+objectness_path: "models/scorer_objectness_pre_geometry.joblib"
 tracking_mode: "ids_only"
 
-# Per-sensor locked optimal configurations
+# Per-sensor pre-geometry optimal configurations
 EVK4:
   percentile: 97.5
   min_events_in_box: 8
@@ -24,8 +29,8 @@ EVK4:
   min_hits: 2
   box_mode: "fixed"
   centroid_mode: "component"
-  box_w: 58
-  box_h: 50
+  box_w: 52
+  box_h: 56
   max_area_frac: 0.03
   min_dim: 20
   max_dim: 80
@@ -41,7 +46,7 @@ DVX:
   open_kernel: 1
   dilate_kernel: 3
   min_hits: 2
-  box_mode: "extent"
+  box_mode: "fixed"
   centroid_mode: "weighted"
   box_w: 18
   box_h: 18
@@ -67,8 +72,8 @@ DAVIS:
   max_area_frac: 0.02
   min_dim: 4
   max_dim: 30
-  extent_scale: 0.8
-  extent_pad: 3.0
+  extent_scale: 1.1
+  extent_pad: 2.0
   nms_iou: 0.3
   conf_min: 0.30
   max_candidates_per_window: 1
