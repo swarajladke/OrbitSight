@@ -13,7 +13,6 @@ Reports Mean, p50, p95, p99, and Max latency across multiple independent repetit
 """
 
 import argparse
-import os
 from pathlib import Path
 import time
 from typing import Any, Dict, List, Tuple
@@ -21,7 +20,6 @@ import numpy as np
 
 from src.common import WINDOW_US, infer_resolution, sequence_name_from_npy
 from src.infer import load_config
-from src.pipeline import run_sequence
 
 
 def benchmark_sequence(
@@ -33,17 +31,9 @@ def benchmark_sequence(
     warmup_windows: int = 20,
 ) -> Dict[str, float]:
     """Measure per-window wall time for a sequence through the full pipeline."""
-    # We time the execution inside an instrumented window loop
     from src.common import event_image, iter_windows, resolve_effective_config
     from src.detector import detect_boxes
-    from src.features import (
-        FEATURE_NAMES,
-        WINDOW_OBJECTNESS_FEATS,
-        build_lagged_window_features,
-        compute_neighborhood_hits_vectorized,
-        extract_candidate_features_vectorized,
-        extract_local_bg,
-    )
+    from src.features import FEATURE_NAMES, extract_window_features_batch
     from src.nms import apply_nms
     from src.static_map import build_continuous_static_map
     import joblib
@@ -123,79 +113,98 @@ def benchmark_sequence(
 
     # Step 2: Extract candidate features and compute window stats
     t_step2_start = time.perf_counter()
-    candidates_by_window = []
-    window_cand_stats = []
+    window_candidates = []
+    diagonal = math.hypot(width, height)
+    max_dist_sq = (float(eff.get("max_dist_frac", 0.04)) * diagonal) ** 2
+    min_hits = int(eff.get("min_hits", 2))
 
     for w_idx in range(num_windows):
         w_start, w_end, boxes = window_records[w_idx]
         if not boxes:
-            candidates_by_window.append([])
-            window_cand_stats.append((0.0, 0.0))
+            window_candidates.append([])
             continue
 
         prev_boxes = window_records[w_idx - 1][2] if w_idx > 0 else []
-        next_boxes = window_records[w_idx + 1][2] if w_idx + 1 < num_windows else []
+        next_boxes = window_records[w_idx + 1][2] if w_idx < num_windows - 1 else []
 
-        hits_list, disp_prev_list, disp_next_list = compute_neighborhood_hits_vectorized(
-            boxes, prev_boxes, next_boxes, max_dist_frac=float(eff.get("max_dist_frac", 0.04)), width=width, height=height
-        )
+        n_cur = len(boxes)
+        cur_centers = np.array([[b["center_x"], b["center_y"]] for b in boxes], dtype=np.float32)
 
-        min_hits = int(eff.get("min_hits", 2))
-        surviving_boxes = []
-        cands_feats_list = []
-        for b_idx, b in enumerate(boxes):
-            h = hits_list[b_idx]
-            if h >= min_hits:
-                bg = extract_local_bg(static_frac_map, b["center_x"], b["center_y"], b["width"], b["height"])
-                f_dict = {
-                    "events": float(b.get("events", 0.0)),
-                    "density": float(b.get("density", 0.0)),
-                    "area": float(b.get("area", 0.0)),
-                    "extent_w": float(b.get("extent_w", b.get("width", 0.0))),
-                    "extent_h": float(b.get("extent_h", b.get("height", 0.0))),
-                    "aspect": float(b.get("aspect", 1.0)),
-                    "hits": float(h),
-                    "disp_prev": float(disp_prev_list[b_idx]),
-                    "disp_next": float(disp_next_list[b_idx]),
-                    "speed": float(max(disp_prev_list[b_idx], disp_next_list[b_idx])),
-                    "dir_consistency": float(1.0 if (disp_prev_list[b_idx] > 0 and disp_next_list[b_idx] > 0) else 0.5),
-                    "static_frac": float(b.get("static_frac", 0.0)),
-                    "local_bg": float(bg),
-                }
-                cands_feats_list.append([f_dict[k] for k in FEATURE_NAMES])
-                surviving_boxes.append((b, h))
+        has_prev = np.zeros(n_cur, dtype=bool)
+        if prev_boxes:
+            p_centers = np.array([[p["center_x"], p["center_y"]] for p in prev_boxes], dtype=np.float32)
+            diff_p = cur_centers[:, None, :] - p_centers[None, :, :]
+            dist_sq_p = np.sum(diff_p * diff_p, axis=2)
+            has_prev = np.any(dist_sq_p <= max_dist_sq, axis=1)
 
-        if cands_feats_list:
-            X_cands = np.array(cands_feats_list, dtype=np.float32)
-            c_probs = learned_scorer.predict_proba(X_cands)[:, 1]
-            scored_cands = []
-            for (b, h), sc in zip(surviving_boxes, c_probs):
-                scored_cands.append((b, h, float(sc)))
-            candidates_by_window.append(scored_cands)
-            window_cand_stats.append((float(np.mean(c_probs)), float(np.max(c_probs))))
-        else:
-            candidates_by_window.append([])
-            window_cand_stats.append((0.0, 0.0))
+        has_next = np.zeros(n_cur, dtype=bool)
+        if next_boxes:
+            n_centers = np.array([[n["center_x"], n["center_y"]] for n in next_boxes], dtype=np.float32)
+            diff_n = cur_centers[:, None, :] - n_centers[None, :, :]
+            dist_sq_n = np.sum(diff_n * diff_n, axis=2)
+            has_next = np.any(dist_sq_n <= max_dist_sq, axis=1)
+
+        cand_boxes_list = []
+        for idx, box in enumerate(boxes):
+            hits = 1 + int(has_prev[idx]) + int(has_next[idx])
+            if min_hits >= 2 and hits < min_hits:
+                continue
+            box_copy = dict(box)
+            box_copy["hits"] = hits
+            cand_boxes_list.append(box_copy)
+
+        if cand_boxes_list:
+            batch_feats = extract_window_features_batch(
+                cand_boxes_list,
+                prev_boxes,
+                next_boxes,
+                count_img=None,
+                static_frac_map=static_frac_map,
+            )
+            cand_features_list = [[f[name] for name in FEATURE_NAMES] for f in batch_feats]
+            X_cand = np.array(cand_features_list, dtype=np.float32)
+            probs = learned_scorer.predict_proba(X_cand)[:, 1]
+            for b_copy, p_score in zip(cand_boxes_list, probs):
+                b_copy["confidence"] = float(p_score)
+
+        window_candidates.append(cand_boxes_list)
 
     # Step 3: Window objectness gating and NMS
+    window_features_21 = []
     for w_idx in range(num_windows):
-        base_window_stats[w_idx]["win_cand_score_mean"] = window_cand_stats[w_idx][0]
-        base_window_stats[w_idx]["win_cand_score_max"] = window_cand_stats[w_idx][1]
+        cands = window_candidates[w_idx]
+        scores = [c["confidence"] for c in cands] if cands else []
+        c_mean = float(np.mean(scores)) if scores else 0.0
+        c_max = float(np.max(scores)) if scores else 0.0
 
-    X_obj_seq = build_lagged_window_features(base_window_stats)
-    p_obj_arr = objectness_model.predict_proba(X_obj_seq)[:, 1]
+        base_stat = dict(base_window_stats[w_idx])
+        base_stat["win_cand_score_mean"] = c_mean
+        base_stat["win_cand_score_max"] = c_max
+        window_features_21.append(base_stat)
 
+    X_win_list = []
     for w_idx in range(num_windows):
-        cands = candidates_by_window[w_idx]
-        if cands:
-            p_obj = float(p_obj_arr[w_idx])
-            gated_boxes = []
-            for b, h, sc in cands:
-                g_conf = sc * p_obj
-                b_copy = dict(b)
-                b_copy["confidence"] = g_conf
-                gated_boxes.append(b_copy)
-            _ = apply_nms(gated_boxes, float(eff.get("nms_iou", 0.3)))
+        cur = window_features_21[w_idx]
+        prev = window_features_21[w_idx - 1] if w_idx > 0 else {k: 0.0 for k in cur}
+        nxt = window_features_21[w_idx + 1] if w_idx < num_windows - 1 else {k: 0.0 for k in cur}
+
+        w_vec = [
+            cur["win_total_events"], cur["win_num_components"], cur["win_x_std"], cur["win_y_std"], cur["win_max_comp_events"], cur["win_cand_score_mean"], cur["win_cand_score_max"],
+            prev["win_total_events"], prev["win_num_components"], prev["win_x_std"], prev["win_y_std"], prev["win_max_comp_events"], prev["win_cand_score_mean"], prev["win_cand_score_max"],
+            nxt["win_total_events"], nxt["win_num_components"], nxt["win_x_std"], nxt["win_y_std"], nxt["win_max_comp_events"], nxt["win_cand_score_mean"], nxt["win_cand_score_max"],
+        ]
+        X_win_list.append(w_vec)
+
+    if X_win_list:
+        X_win = np.array(X_win_list, dtype=np.float32)
+        win_probs = objectness_model.predict_proba(X_win)[:, 1]
+        for w_idx in range(num_windows):
+            p_obj = float(win_probs[w_idx])
+            cands = window_candidates[w_idx]
+            if cands:
+                for c in cands:
+                    c["confidence"] = float(c["confidence"]) * p_obj
+                _ = apply_nms(cands, float(eff.get("nms_iou", 0.3)))
 
     t_step2_end = time.perf_counter()
     post_overhead_per_window_ms = ((t_step2_end - t_step2_start) * 1000.0) / num_windows
