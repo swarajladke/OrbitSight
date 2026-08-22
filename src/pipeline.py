@@ -81,12 +81,21 @@ def run_sequence(
         Tuple of (prediction_rows, num_windows_processed).
         Each prediction row: (w_start, w_end, center_x, center_y, width, height, confidence).
     """
-    if width >= 1200:
+    known_sensors = {
+        "EVK4": (1280, 720, float(np.hypot(1280, 720))),
+        "DVX": (640, 480, float(np.hypot(640, 480))),
+        "DAVIS": (346, 260, float(np.hypot(346, 260))),
+    }
+    curr_diag = float(np.hypot(width, height))
+
+    if width == 1280 and height == 720:
         sensor_name = "EVK4"
-    elif width >= 600:
+    elif width == 640 and height == 480:
         sensor_name = "DVX"
-    else:
+    elif width == 346 and height == 260:
         sensor_name = "DAVIS"
+    else:
+        sensor_name = min(known_sensors.keys(), key=lambda k: abs(curr_diag - known_sensors[k][2]))
 
     eff = resolve_effective_config(cfg, sensor_name)
 

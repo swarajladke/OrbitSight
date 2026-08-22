@@ -6,6 +6,8 @@ dilate_kernel: 3
 min_hits: 2
 box_mode: "fixed"
 centroid_mode: "weighted"
+box_w: 18
+box_h: 18
 max_area_frac: 0.02
 nms_iou: 0.3
 conf_min: 0.30
