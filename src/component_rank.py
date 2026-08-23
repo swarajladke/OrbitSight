@@ -2,6 +2,7 @@
 
 Measures the rank of ground-truth matched bounding boxes among connected components
 sorted by event count descending across all GT-occupied windows.
+Uses exact detect_boxes implementation and single-source src.metrics.iou.
 """
 
 import argparse
@@ -10,11 +11,10 @@ from pathlib import Path
 import sys
 from typing import Any, Dict, List, Optional, Tuple
 
-import cv2
 import numpy as np
 
 from src.common import WINDOW_US, infer_resolution, iter_windows, load_events, sequence_name_from_npy
-from src.detector import int_percentile
+from src.detector import detect_boxes
 from src.infer import load_config
 from src.metrics import iou
 from src.static_map import build_continuous_static_map
@@ -53,18 +53,10 @@ def profile_sequence_component_ranks(
         sensor_name = "DVX"
 
     eff = {**cfg, **cfg.get(sensor_name, {})}
-    percentile = float(eff.get("percentile", 97.5))
-    min_events = float(eff.get("min_events_in_box", 6))
-    open_k = int(eff.get("open_kernel", 2))
-    dilate_k = int(eff.get("dilate_kernel", 3))
-    max_area_frac = float(eff.get("max_area_frac", 0.02))
-    max_area_pixels = max_area_frac * (width * height)
     static_thresh = float(eff.get("static_thresh", 0.5))
-    box_mode = str(eff.get("box_mode", "fixed")).lower()
-    box_w_cfg = float(eff.get("box_w", 18))
-    box_h_cfg = float(eff.get("box_h", 18))
-    extent_scale = float(eff.get("extent_scale", 1.0))
-    extent_pad = float(eff.get("extent_pad", 2.0))
+
+    # Profile config: set max_components_per_window to unbounded to measure true full rank
+    profile_cfg = {**eff, "max_components_per_window": 10000}
 
     # Continuous static mask
     static_map = build_continuous_static_map(events, width, height, window_us=WINDOW_US)
@@ -76,64 +68,22 @@ def profile_sequence_component_ranks(
         if ws not in gt_by_ts:
             continue
         if len(w_events) == 0:
+            for _ in gt_by_ts[ws]:
+                results.append({
+                    "sequence": seq_name,
+                    "sensor": sensor_name,
+                    "matched": False,
+                    "rank": -1,
+                    "total_components": 0,
+                })
             continue
 
-        xs = w_events[:, 0].astype(np.int32)
-        ys = w_events[:, 1].astype(np.int32)
-        valid = (xs >= 0) & (xs < width) & (ys >= 0) & (ys < height)
-        xs, ys = xs[valid], ys[valid]
-
-        count_img = np.zeros((height, width), dtype=np.int32)
-        np.add.at(count_img, (ys, xs), 1)
-        count_img[static_mask] = 0
-
-        nonzero = count_img[count_img > 0]
-        if len(nonzero) < 4:
-            continue
-
-        p_val = float(int_percentile(nonzero, percentile))
-        binary = (count_img >= p_val).astype(np.uint8)
-
-        if open_k > 0:
-            k_open = cv2.getStructuringElement(cv2.MORPH_RECT, (open_k, open_k))
-            binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, k_open)
-
-        if dilate_k > 0:
-            k_dilate = cv2.getStructuringElement(cv2.MORPH_RECT, (dilate_k, dilate_k))
-            binary = cv2.dilate(binary, k_dilate)
-
-        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
-            binary, connectivity=8
+        # Run exact detector connected-component extraction and box construction
+        candidate_boxes = detect_boxes(
+            w_events, width, height, static_mask, cfg=profile_cfg
         )
-        if num_labels <= 1:
-            continue
 
-        label_event_sums = np.bincount(labels.ravel(), weights=count_img.ravel(), minlength=num_labels)
-
-        # Collect components
-        candidate_components: List[Tuple[float, float, float, float, float]] = []
-        for label_idx in range(1, num_labels):
-            comp_area = float(stats[label_idx, cv2.CC_STAT_AREA])
-            x_box = int(stats[label_idx, cv2.CC_STAT_LEFT])
-            y_box = int(stats[label_idx, cv2.CC_STAT_TOP])
-            w_box = int(stats[label_idx, cv2.CC_STAT_WIDTH])
-            h_box = int(stats[label_idx, cv2.CC_STAT_HEIGHT])
-
-            if comp_area > max_area_pixels:
-                continue
-
-            comp_events = float(label_event_sums[label_idx])
-            if comp_events >= min_events:
-                if box_mode == "extent":
-                    bw = max(4.0, float(w_box) * extent_scale + extent_pad)
-                    bh = max(4.0, float(h_box) * extent_scale + extent_pad)
-                else:
-                    bw, bh = box_w_cfg, box_h_cfg
-                cx = float(x_box) + float(w_box) / 2.0
-                cy = float(y_box) + float(h_box) / 2.0
-                candidate_components.append((cx, cy, bw, bh, comp_events))
-
-        total_comps = len(candidate_components)
+        total_comps = len(candidate_boxes)
         if total_comps == 0:
             for _ in gt_by_ts[ws]:
                 results.append({
@@ -145,15 +95,19 @@ def profile_sequence_component_ranks(
                 })
             continue
 
-        # Sort by event count descending
-        candidate_components.sort(key=lambda c: c[4], reverse=True)
-
         for g_cx, g_cy, g_bw, g_bh in gt_by_ts[ws]:
             best_iou = 0.0
             best_rank = -1
+            gt_tuple = (float(g_cx), float(g_cy), float(g_bw), float(g_bh))
 
-            for rank_idx, (c_cx, c_cy, c_bw, c_bh, _) in enumerate(candidate_components, start=1):
-                cur_iou = iou((c_cx, c_cy, c_bw, c_bh), (float(g_cx), float(g_cy), float(g_bw), float(g_bh)))
+            for rank_idx, c_box in enumerate(candidate_boxes, start=1):
+                c_tuple = (
+                    float(c_box["center_x"]),
+                    float(c_box["center_y"]),
+                    float(c_box["width"]),
+                    float(c_box["height"]),
+                )
+                cur_iou = iou(c_tuple, gt_tuple)
                 if cur_iou > best_iou:
                     best_iou = cur_iou
                     if cur_iou >= 0.5:
@@ -174,14 +128,14 @@ def profile_sequence_component_ranks(
 def summarize_ranks(records: List[Dict[str, Any]], label: str = "ALL") -> None:
     """Print summary statistics table for a set of rank records."""
     if not records:
-        print(f"{label:12s} | No records.")
+        print(f"{label:15s} | No records.")
         return
 
     n_windows = len(records)
     matched = [r for r in records if r["matched"]]
     n_matched = len(matched)
     if n_matched == 0:
-        print(f"{label:12s} | win: {n_windows:5d} | matched: 0 | p50: UNMEASURED | p95: UNMEASURED | p99: UNMEASURED | max: UNMEASURED | >64: 0")
+        print(f"{label:15s} | win: {n_windows:5d} | matched: {n_matched:5d} | p50: UNMEASURED | p95: UNMEASURED | p99: UNMEASURED | max: UNMEASURED | >64: 0")
         return
 
     ranks = np.array([r["rank"] for r in matched], dtype=np.int32)
@@ -192,7 +146,7 @@ def summarize_ranks(records: List[Dict[str, Any]], label: str = "ALL") -> None:
     n_gt64 = int(np.sum(ranks > 64))
 
     print(
-        f"{label:12s} | win: {n_windows:5d} | matched: {n_matched:5d} | "
+        f"{label:15s} | win: {n_windows:5d} | matched: {n_matched:5d} | "
         f"p50: {p50:4.1f} | p95: {p95:4.1f} | p99: {p99:4.1f} | "
         f"max: {max_rank:4d} | >64: {n_gt64:3d}"
     )
@@ -211,7 +165,7 @@ def main() -> None:
     gt_files = sorted(list(dataset_dir.rglob("*_bb_windows_40ms.txt")))
     all_records: List[Dict[str, Any]] = []
 
-    print(f"Profiling component ranks across {len(gt_files)} sequences...\n")
+    print(f"Profiling component ranks across {len(gt_files)} sequences with exact detect_boxes...\n")
 
     for gt_f in gt_files:
         seq_name = gt_f.name.replace("_bb_windows_40ms.txt", "")
@@ -223,22 +177,31 @@ def main() -> None:
         all_records.extend(recs)
 
     print("=== Component Rank Distribution across All GT-Occupied Windows ===")
-    summarize_ranks([r for r in all_records if r["sensor"] == "EVK4"], "EVK4")
-    summarize_ranks([r for r in all_records if r["sensor"] == "DVX"], "DVX")
-    summarize_ranks([r for r in all_records if r["sensor"] == "DAVIS"], "DAVIS")
+    evk4_recs = [r for r in all_records if r["sensor"] == "EVK4"]
+    dvx_recs = [r for r in all_records if r["sensor"] == "DVX"]
+    davis_recs = [r for r in all_records if r["sensor"] == "DAVIS"]
+
+    summarize_ranks(evk4_recs, "EVK4")
+    summarize_ranks(dvx_recs, "DVX")
+    summarize_ranks(davis_recs, "DAVIS")
     summarize_ranks(all_records, "OVERALL")
 
-    # Noisiest decile analysis (top 10% total components per window)
-    if all_records:
-        comp_counts = np.array([r["total_components"] for r in all_records])
-        noisy_thresh = float(np.percentile(comp_counts, 90))
-        noisy_records = [r for r in all_records if r["total_components"] >= noisy_thresh]
+    # True per-sensor noisiest decile analysis (top 10% component count per sensor)
+    print("\n=== Component Rank Distribution (Per-Sensor Noisiest Decile, Top 10%) ===")
+    noisy_all: List[Dict[str, Any]] = []
 
-        print(f"\n=== Component Rank Distribution (Noisiest Decile >= {noisy_thresh:.0f} components) ===")
-        summarize_ranks([r for r in noisy_records if r["sensor"] == "EVK4"], "EVK4 (Noisy)")
-        summarize_ranks([r for r in noisy_records if r["sensor"] == "DVX"], "DVX (Noisy)")
-        summarize_ranks([r for r in noisy_records if r["sensor"] == "DAVIS"], "DAVIS (Noisy)")
-        summarize_ranks(noisy_records, "OVERALL (Noisy)")
+    for s_name, s_recs in [("EVK4", evk4_recs), ("DVX", dvx_recs), ("DAVIS", davis_recs)]:
+        if not s_recs:
+            continue
+        s_counts = np.array([r["total_components"] for r in s_recs])
+        p90_thresh = float(np.percentile(s_counts, 90))
+        s_noisy = [r for r in s_recs if r["total_components"] >= p90_thresh]
+        noisy_all.extend(s_noisy)
+        print(f"[{s_name}] p90 Threshold = {p90_thresh:.1f} components:")
+        summarize_ranks(s_noisy, f"{s_name} (Noisy)")
+
+    print("-" * 65)
+    summarize_ranks(noisy_all, "OVERALL (Noisy)")
 
 
 if __name__ == "__main__":

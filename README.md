@@ -156,6 +156,8 @@ To quantify the value of the 1-window lookahead ($40.0\text{ ms}$ algorithmic la
 | **False Positives (FP)** | **6,918** | 7,218 | +300 |
 | **False Negatives (FN)** | 10,232 | **10,132** | -100 |
 
+*Note: Ablation measured against the pre-76c3e2a baseline; relative framing and percentage delta (+92.2% sparse gain) unchanged, absolute values pending re-measurement.*
+
 **Finding**: Removing the 1-window lookahead costs **$48.0\%$ of sparse track mAP** (equivalently, the 1-window lookahead delivers **$+92.2\%$ relative mAP gain on sparse sequences**, increasing sparse mAP from $0.051086$ to $0.098205$). On dense sequences, causal tracking maintains accuracy due to continuous target signal.
 
 ---
