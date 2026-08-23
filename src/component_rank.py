@@ -72,11 +72,10 @@ def profile_sequence_component_ranks(
 
     results: List[Dict[str, Any]] = []
 
-    for w_events in iter_windows(events, window_us=WINDOW_US):
-        if len(w_events) == 0:
-            continue
-        ws = int(w_events[0, 3])
+    for ws, we, w_events in iter_windows(events, window_us=WINDOW_US):
         if ws not in gt_by_ts:
+            continue
+        if len(w_events) == 0:
             continue
 
         xs = w_events[:, 0].astype(np.int32)

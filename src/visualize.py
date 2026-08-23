@@ -71,7 +71,7 @@ def render_video(
 
     frame_count = 0
 
-    for w_idx, w_events in enumerate(iter_windows(events, window_us=WINDOW_US)):
+    for w_idx, (ws_ts, we_ts, w_events) in enumerate(iter_windows(events, window_us=WINDOW_US)):
         if max_windows is not None and w_idx >= max_windows:
             break
 
@@ -93,8 +93,6 @@ def render_video(
 
         # Convert to 3-channel BGR image
         frame = cv2.cvtColor(count_img, cv2.COLOR_GRAY2BGR)
-
-        ws_ts = int(w_events[0, 3]) if len(w_events) > 0 else (w_idx * WINDOW_US)
 
         # Draw Ground Truth Boxes in Green (BGR: 0, 255, 0)
         if ws_ts in gt_by_ts:
