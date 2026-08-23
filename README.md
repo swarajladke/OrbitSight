@@ -3,7 +3,7 @@
 [![Python 3.11](https://img.shields.io/badge/python-3.11-blue.svg)](https://www.python.org/downloads/release/python-3110/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Compute Throughput](https://img.shields.io/badge/Compute_p99-19.15_--_175.99ms-blue.svg)](#real-streaming-latency--real-time-performance)
-[![Scoreboard mAP](https://img.shields.io/badge/mAP%400.5-0.163628-success.svg)](#benchmark-performance)
+[![Scoreboard mAP](https://img.shields.io/badge/mAP%400.5-0.165103-success.svg)](#benchmark-performance)
 
 **OrbitSight** is a high-performance neuromorphic space domain awareness (SDA) pipeline designed to detect and track low-Earth orbit (LEO), medium-Earth orbit (MEO), and geostationary (GEO) satellites and orbital debris using event-based vision sensors (Prophesee EVK4, iniVation DAVIS346, and DVXplorer).
 
@@ -46,9 +46,9 @@ Space Domain Awareness (SDA) is critical for spaceflight safety, collision avoid
                                                     │
                                                     ▼
 [Phase 5: Streaming Optimization] ◄─── [Phase 4: Two-Stage Objectness Gating]
-      Vectorized Component Binning           mAP: 0.163628 (+5.2% vs Baseline)
-      5 Stably Passing Sequences             F1:  0.371104 (+21.3% vs Baseline)
-      Causal Ablation Disclosed              FP:  6,918 (-47.4% FPs vs Baseline)
+      Vectorized Component Binning           mAP: 0.165103 (+6.2% vs Baseline)
+      5 Stably Passing Sequences             F1:  0.371077 (+21.2% vs Baseline)
+      Causal Ablation Disclosed              FP:  6,920 (-47.4% FPs vs Baseline)
 ```
 
 ### Phase 1: Pre-Geometry Baseline Pipeline
@@ -65,10 +65,11 @@ Space Domain Awareness (SDA) is critical for spaceflight safety, collision avoid
 ### Phase 4: Two-Stage Temporal Window Objectness Gating
 - Trained a sequence-level window objectness classifier on 21-D temporal window statistics (`models/scorer_objectness_pre_geometry.joblib`).
 - Gating candidate scores by window objectness probability: `g_conf = score * p_obj` with threshold `0.30`.
-- **mAP increased to `0.163628` (+5.2% relative gain over baseline)**, **F1 surged to `0.371104` (+21.3% gain)**, and **false alarms plunged from 13,146 down to 6,918** (47.4% false alarm reduction).
+- **mAP increased to `0.165103` (+6.2% relative gain over baseline)**, **F1 surged to `0.371077` (+21.2% gain)**, and **false alarms plunged from 13,146 down to 6,920** (47.4% false alarm reduction).
 
 ### Phase 5: Streaming Pipeline Optimization & Real-Time Profiling
 - Replaced iterative component loops with vectorized `np.bincount` event summation and bounded candidate sorting (`max_components_per_window: 64`).
+- Validated via `src/component_rank.py` that maximum true target component rank across all 15,290 windows is **26** ($p_{99} = 5.0$), ensuring zero candidate truncation.
 - Profiled full per-window streaming latency across 3 independent runs without synthetic amortization constants.
 
 ---
@@ -81,7 +82,7 @@ Authoritative scoreboard evaluation across the **17 Training Sequences** (15,292
 |---|---|---|---|---|---|---|---|---|---|
 | **Baseline Heuristic** | Weighted | `0.05`, `k=2` | 0.101145 | 0.029947 | **0.348614** | 0.055156 | 5,331 | 172,683 | 9,961 |
 | **Learned Baseline** | Learned | `0.05`, `k=2` | 0.155493 | 0.281011 | 0.335993 | 0.306052 | **5,138** | 13,146 | 10,154 |
-| **OrbitSight Final (Locked)** | **Learned + Objectness** | **`0.30`, `k=1`** | **0.163628** | **0.422441** | **0.330892** | **0.371104** | **5,060** | **6,918** | **10,232** |
+| **OrbitSight Final (Locked)** | **Learned + Objectness** | **`0.30`, `k=1`** | **0.165103** | **0.422371** | **0.330892** | **0.371077** | **5,060** | **6,920** | **10,232** |
 
 ### Per-Sequence AP@0.5 Breakdown across All 17 Training Sequences
 
@@ -92,7 +93,7 @@ Authoritative scoreboard evaluation across the **17 Training Sequences** (15,292
 | `DAVIS_EGS_16908_2024-11-01-19-10-44` | Dense ($>43$) | DAVIS | 3,140 | **0.3447** |
 | `DAVIS_Filtered_NOAA6_11416_2025-01-13-19-51-06` | Dense ($>43$) | DAVIS | 1,158 | **0.0181** |
 | `DAVIS_RESURSDK1_29228_2024-12-04-18-37-01` | Sparse ($\le 43$) | DAVIS | 23 | **0.1348** |
-| `DAVIS_SL12RB2_15772_2024-12-04-18-21-37` | Sparse ($\le 43$) | DAVIS | 0 (or 8) | **0.0000** |
+| `DAVIS_SL12RB2_15772_2024-12-04-18-21-37` | Sparse ($\le 43$) | DAVIS | 8 | **0.1250** |
 | `DAVIS_SL16RB_20625_2024-12-04-19-34-18` | Dense ($>43$) | DAVIS | 197 | **0.1824** |
 | `DAVIS_SL16RB_26070_2024-12-04-19-14-39` | Sparse ($\le 43$) | DAVIS | 10 | **0.0900** |
 | `DAVIS_SL8RB_2025-01-13-19-15-36` | Dense ($>43$) | DAVIS | 5,605 | **0.2390** |
