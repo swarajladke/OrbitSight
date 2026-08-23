@@ -129,6 +129,7 @@ def process_sequence(
 
     content = "\n".join(output_lines) + "\n"
 
+    output_dir.mkdir(parents=True, exist_ok=True)
     target_files = [
         output_dir / f"{seq_name}.txt",
         output_dir / f"{seq_name}_pred.txt",

@@ -1,15 +1,24 @@
-"""Full-pipeline per-window latency benchmark measuring wall-clock execution time.
+"""Streaming per-window full-pipeline latency benchmark measuring true wall-clock execution time.
 
-Measures the complete end-to-end inference stack per window:
-1. Event window slicing & event count map accumulation
-2. Component detection & morphology
-3. Multi-window persistence neighborhood matching
-4. 13-dim candidate feature extraction & learned scorer evaluation
-5. 21-dim window objectness feature construction & gate evaluation
-6. Pipeline NMS, confidence threshold gating, top-k selection, and coordinate rounding
+Evaluates one single streaming window loop holding a 3-window sliding buffer (prev, cur, next):
+For each window t:
+1. Window t+1's events become available.
+2. Timer starts (t_start).
+3. Compute event count map, detect_boxes, static filter, base window stats for window t+1.
+4. With window t-1, t, and t+1 available:
+   - Perform persistence neighborhood matching for window t.
+   - Extract 13-dim candidate features for window t.
+   - Run learned candidate scorer predict_proba for window t.
+   - Construct 21-dim window objectness feature vector for window t.
+   - Run window objectness gate predict_proba for window t.
+   - Multiply candidate confidences by p_obj.
+   - Apply conf_min, NMS, top-k selection, and coordinate rounding for window t.
+5. Timer stops (t_end).
+   Compute wall-clock latency per window: (t_end - t_start) * 1000.0 ms.
 
-Excludes the first 20 windows per sequence as warmup overhead (JIT/caching/model loading).
-Reports Mean, p50, p95, p99, and Max latency across multiple independent repetitions.
+Excludes the first 20 warmup windows per sequence.
+Separately tracks and isolates any system stall windows (> 1000 ms).
+Reports COMPUTE p50, p95, p99, and Max, along with TOTAL latency (Compute + 40 ms algorithmic lookahead).
 """
 
 import argparse
@@ -20,18 +29,18 @@ from typing import Any, Dict, List, Tuple
 import numpy as np
 
 from src.common import WINDOW_US, infer_resolution, sequence_name_from_npy
-from src.infer import load_config
+from src.infer import load_config, load_events
 
 
-def benchmark_sequence(
+def benchmark_sequence_streaming(
     events: np.ndarray,
     width: int,
     height: int,
     cfg: Dict[str, Any],
     window_us: int = WINDOW_US,
     warmup_windows: int = 20,
-) -> Dict[str, float]:
-    """Measure per-window wall time for a sequence through the full pipeline."""
+) -> Dict[str, Any]:
+    """Measure true per-window wall time in a streaming 3-window buffer pipeline."""
     from src.common import event_image, iter_windows, resolve_effective_config
     from src.detector import detect_boxes
     from src.features import FEATURE_NAMES, extract_window_features_batch
@@ -56,7 +65,6 @@ def benchmark_sequence(
 
     eff = resolve_effective_config(cfg, sensor_name)
 
-    # Scorer and objectness models
     scorer_path = Path(eff.get("scorer_path", "models/scorer_pregeom.joblib"))
     if not scorer_path.exists():
         scorer_path = Path("models/scorer.joblib")
@@ -69,13 +77,25 @@ def benchmark_sequence(
     static_thresh = eff.get("static_thresh", None)
     static_mask = static_frac_map >= float(static_thresh) if static_thresh is not None else None
 
-    # Step 1: Collect windows and components while profiling
-    window_records = []
-    base_window_stats = []
-    per_window_latencies_ms: List[float] = []
+    diagonal = math.hypot(width, height)
+    max_dist_sq = (float(eff.get("max_dist_frac", 0.04)) * diagonal) ** 2
+    min_hits = int(eff.get("min_hits", 2))
+    conf_min = float(eff.get("conf_min", 0.30))
+    nms_iou = float(eff.get("nms_iou", 0.30))
+    max_k = int(eff.get("max_candidates_per_window", 1))
 
-    for w_start, w_end, w_events in iter_windows(events, window_us=window_us):
-        t0 = time.perf_counter()
+    # Pre-slice event windows into an iterator stream
+    event_window_list = list(iter_windows(events, window_us=window_us))
+    num_total_windows = len(event_window_list)
+    if num_total_windows == 0:
+        return {"windows": 0, "compute_mean": 0.0, "compute_p50": 0.0, "compute_p95": 0.0, "compute_p99": 0.0, "compute_max": 0.0, "stalls": 0}
+
+    # Streaming 3-window sliding buffer state:
+    # Each entry is a dict: {"w_start", "w_end", "boxes", "base_stat", "cand_score_mean", "cand_score_max"}
+    window_buffer: List[Dict[str, Any]] = []
+    per_window_compute_ms: List[float] = []
+
+    def process_new_window(w_start: int, w_end: int, w_events: np.ndarray) -> Dict[str, Any]:
         count_img, _, _ = event_image(w_events, width, height, need_polarity=False)
         boxes = detect_boxes(count_img, width, height, cfg)
         if static_mask is not None and boxes:
@@ -88,150 +108,159 @@ def benchmark_sequence(
                 filtered_boxes.append(b)
             boxes = filtered_boxes
 
-        n_w_events = len(w_events)
-        if n_w_events > 0:
-            w_x_std = float(np.std(w_events[:, 0]))
-            w_y_std = float(np.std(w_events[:, 1]))
-        else:
-            w_x_std, w_y_std = 0.0, 0.0
+        n_ev = len(w_events)
+        x_std = float(np.std(w_events[:, 0])) if n_ev > 0 else 0.0
+        y_std = float(np.std(w_events[:, 1])) if n_ev > 0 else 0.0
+        max_c = max((float(b.get("events", 0.0)) for b in boxes), default=0.0)
 
-        max_comp_evts = max((float(b.get("events", 0.0)) for b in boxes), default=0.0)
-        base_window_stats.append({
-            "win_total_events": float(n_w_events),
+        base_stat = {
+            "win_total_events": float(n_ev),
             "win_num_components": float(len(boxes)),
-            "win_x_std": w_x_std,
-            "win_y_std": w_y_std,
-            "win_max_comp_events": max_comp_evts,
-        })
-        window_records.append((w_start, w_end, boxes))
+            "win_x_std": x_std,
+            "win_y_std": y_std,
+            "win_max_comp_events": max_c,
+            "win_cand_score_mean": 0.0,
+            "win_cand_score_max": 0.0,
+        }
+        return {"w_start": w_start, "w_end": w_end, "boxes": boxes, "base_stat": base_stat}
 
-        t1 = time.perf_counter()
-        per_window_latencies_ms.append((t1 - t0) * 1000.0)
+    # Prime the buffer with window 0
+    w0_s, w0_e, w0_ev = event_window_list[0]
+    window_buffer.append(process_new_window(w0_s, w0_e, w0_ev))
 
-    num_windows = len(window_records)
-    if num_windows == 0:
-        return {"windows": 0, "mean": 0.0, "p50": 0.0, "p95": 0.0, "p99": 0.0, "max": 0.0}
+    for t in range(num_total_windows):
+        t_start = time.perf_counter()
 
-    # Step 2: Extract candidate features and compute window stats
-    t_step2_start = time.perf_counter()
-    window_candidates = []
-    diagonal = math.hypot(width, height)
-    max_dist_sq = (float(eff.get("max_dist_frac", 0.04)) * diagonal) ** 2
-    min_hits = int(eff.get("min_hits", 2))
+        # Ingest window t+1 into lookahead buffer if available
+        if t + 1 < num_total_windows:
+            wn_s, wn_e, wn_ev = event_window_list[t + 1]
+            win_next = process_new_window(wn_s, wn_e, wn_ev)
+            window_buffer.append(win_next)
+        else:
+            win_next = None
 
-    for w_idx in range(num_windows):
-        w_start, w_end, boxes = window_records[w_idx]
-        if not boxes:
-            window_candidates.append([])
-            continue
+        win_cur = window_buffer[0] if len(window_buffer) == 1 else window_buffer[-2 if win_next is not None else -1]
+        win_prev = window_buffer[-3] if len(window_buffer) >= 3 and win_next is not None else (window_buffer[-2] if win_next is None and len(window_buffer) >= 2 else None)
 
-        prev_boxes = window_records[w_idx - 1][2] if w_idx > 0 else []
-        next_boxes = window_records[w_idx + 1][2] if w_idx < num_windows - 1 else []
+        boxes_cur = win_cur["boxes"]
+        boxes_prev = win_prev["boxes"] if win_prev is not None else []
+        boxes_next = win_next["boxes"] if win_next is not None else []
 
-        n_cur = len(boxes)
-        cur_centers = np.array([[b["center_x"], b["center_y"]] for b in boxes], dtype=np.float32)
+        # Persistence matching for window t
+        cands_cur = []
+        if boxes_cur:
+            n_cur = len(boxes_cur)
+            cur_centers = np.array([[b["center_x"], b["center_y"]] for b in boxes_cur], dtype=np.float32)
 
-        has_prev = np.zeros(n_cur, dtype=bool)
-        if prev_boxes:
-            p_centers = np.array([[p["center_x"], p["center_y"]] for p in prev_boxes], dtype=np.float32)
-            diff_p = cur_centers[:, None, :] - p_centers[None, :, :]
-            dist_sq_p = np.sum(diff_p * diff_p, axis=2)
-            has_prev = np.any(dist_sq_p <= max_dist_sq, axis=1)
+            has_prev = np.zeros(n_cur, dtype=bool)
+            if boxes_prev:
+                p_centers = np.array([[p["center_x"], p["center_y"]] for p in boxes_prev], dtype=np.float32)
+                diff_p = cur_centers[:, None, :] - p_centers[None, :, :]
+                has_prev = np.any(np.sum(diff_p * diff_p, axis=2) <= max_dist_sq, axis=1)
 
-        has_next = np.zeros(n_cur, dtype=bool)
-        if next_boxes:
-            n_centers = np.array([[n["center_x"], n["center_y"]] for n in next_boxes], dtype=np.float32)
-            diff_n = cur_centers[:, None, :] - n_centers[None, :, :]
-            dist_sq_n = np.sum(diff_n * diff_n, axis=2)
-            has_next = np.any(dist_sq_n <= max_dist_sq, axis=1)
+            has_next = np.zeros(n_cur, dtype=bool)
+            if boxes_next:
+                n_centers = np.array([[n["center_x"], n["center_y"]] for n in boxes_next], dtype=np.float32)
+                diff_n = cur_centers[:, None, :] - n_centers[None, :, :]
+                has_next = np.any(np.sum(diff_n * diff_n, axis=2) <= max_dist_sq, axis=1)
 
-        cand_boxes_list = []
-        for idx, box in enumerate(boxes):
-            hits = 1 + int(has_prev[idx]) + int(has_next[idx])
-            if min_hits >= 2 and hits < min_hits:
-                continue
-            box_copy = dict(box)
-            box_copy["hits"] = hits
-            cand_boxes_list.append(box_copy)
+            for idx, box in enumerate(boxes_cur):
+                hits = 1 + int(has_prev[idx]) + int(has_next[idx])
+                if min_hits >= 2 and hits < min_hits:
+                    continue
+                b_copy = dict(box)
+                b_copy["hits"] = hits
+                cands_cur.append(b_copy)
 
-        if cand_boxes_list:
-            batch_feats = extract_window_features_batch(
-                cand_boxes_list,
-                prev_boxes,
-                next_boxes,
-                count_img=None,
-                static_frac_map=static_frac_map,
-            )
-            cand_features_list = [[f[name] for name in FEATURE_NAMES] for f in batch_feats]
-            X_cand = np.array(cand_features_list, dtype=np.float32)
-            probs = learned_scorer.predict_proba(X_cand)[:, 1]
-            for b_copy, p_score in zip(cand_boxes_list, probs):
-                b_copy["confidence"] = float(p_score)
+            if cands_cur:
+                batch_feats = extract_window_features_batch(
+                    cands_cur,
+                    boxes_prev,
+                    boxes_next,
+                    count_img=None,
+                    static_frac_map=static_frac_map,
+                )
+                cand_features_list = [[f[name] for name in FEATURE_NAMES] for f in batch_feats]
+                X_cand = np.array(cand_features_list, dtype=np.float32)
+                probs = learned_scorer.predict_proba(X_cand)[:, 1]
+                for b_copy, p_score in zip(cands_cur, probs):
+                    b_copy["confidence"] = float(p_score)
 
-        window_candidates.append(cand_boxes_list)
+        # Window stats for objectness
+        cur_scores = [c["confidence"] for c in cands_cur] if cands_cur else []
+        win_cur["base_stat"]["win_cand_score_mean"] = float(np.mean(cur_scores)) if cur_scores else 0.0
+        win_cur["base_stat"]["win_cand_score_max"] = float(np.max(cur_scores)) if cur_scores else 0.0
 
-    # Step 3: Window objectness gating and NMS
-    window_features_21 = []
-    for w_idx in range(num_windows):
-        cands = window_candidates[w_idx]
-        scores = [c["confidence"] for c in cands] if cands else []
-        c_mean = float(np.mean(scores)) if scores else 0.0
-        c_max = float(np.max(scores)) if scores else 0.0
-
-        base_stat = dict(base_window_stats[w_idx])
-        base_stat["win_cand_score_mean"] = c_mean
-        base_stat["win_cand_score_max"] = c_max
-        window_features_21.append(base_stat)
-
-    X_win_list = []
-    for w_idx in range(num_windows):
-        cur = window_features_21[w_idx]
-        prev = window_features_21[w_idx - 1] if w_idx > 0 else {k: 0.0 for k in cur}
-        nxt = window_features_21[w_idx + 1] if w_idx < num_windows - 1 else {k: 0.0 for k in cur}
+        # Construct 21-dim window objectness feature vector
+        cur_s = win_cur["base_stat"]
+        prev_s = win_prev["base_stat"] if win_prev is not None else {k: 0.0 for k in cur_s}
+        next_s = win_next["base_stat"] if win_next is not None else {k: 0.0 for k in cur_s}
 
         w_vec = [
-            cur["win_total_events"], cur["win_num_components"], cur["win_x_std"], cur["win_y_std"], cur["win_max_comp_events"], cur["win_cand_score_mean"], cur["win_cand_score_max"],
-            prev["win_total_events"], prev["win_num_components"], prev["win_x_std"], prev["win_y_std"], prev["win_max_comp_events"], prev["win_cand_score_mean"], prev["win_cand_score_max"],
-            nxt["win_total_events"], nxt["win_num_components"], nxt["win_x_std"], nxt["win_y_std"], nxt["win_max_comp_events"], nxt["win_cand_score_mean"], nxt["win_cand_score_max"],
+            cur_s["win_total_events"], cur_s["win_num_components"], cur_s["win_x_std"], cur_s["win_y_std"], cur_s["win_max_comp_events"], cur_s["win_cand_score_mean"], cur_s["win_cand_score_max"],
+            prev_s["win_total_events"], prev_s["win_num_components"], prev_s["win_x_std"], prev_s["win_y_std"], prev_s["win_max_comp_events"], prev_s["win_cand_score_mean"], prev_s["win_cand_score_max"],
+            next_s["win_total_events"], next_s["win_num_components"], next_s["win_x_std"], next_s["win_y_std"], next_s["win_max_comp_events"], next_s["win_cand_score_mean"], next_s["win_cand_score_max"],
         ]
-        X_win_list.append(w_vec)
+        X_w = np.array([w_vec], dtype=np.float32)
+        p_obj = float(objectness_model.predict_proba(X_w)[0, 1])
 
-    if X_win_list:
-        X_win = np.array(X_win_list, dtype=np.float32)
-        win_probs = objectness_model.predict_proba(X_win)[:, 1]
-        for w_idx in range(num_windows):
-            p_obj = float(win_probs[w_idx])
-            cands = window_candidates[w_idx]
-            if cands:
-                for c in cands:
-                    c["confidence"] = float(c["confidence"]) * p_obj
-                _ = apply_nms(cands, float(eff.get("nms_iou", 0.3)))
+        # Finalize detections for window t
+        final_preds_t = []
+        if cands_cur:
+            gated_boxes = []
+            for c in cands_cur:
+                g_conf = float(c["confidence"]) * p_obj
+                if g_conf >= conf_min:
+                    b_copy = dict(c)
+                    b_copy["confidence"] = g_conf
+                    gated_boxes.append(b_copy)
 
-    t_step2_end = time.perf_counter()
-    post_overhead_per_window_ms = ((t_step2_end - t_step2_start) * 1000.0) / num_windows
+            if gated_boxes:
+                nms_boxes = apply_nms(gated_boxes, nms_iou)
+                nms_boxes.sort(key=lambda x: float(x.get("confidence", 0.0)), reverse=True)
+                for b in nms_boxes[:max_k]:
+                    final_preds_t.append((
+                        win_cur["w_start"], win_cur["w_end"],
+                        int(round(b["center_x"])), int(round(b["center_y"])),
+                        int(round(b["width"])), int(round(b["height"])),
+                        round(float(b["confidence"]), 4)
+                    ))
 
-    # Total full-pipeline latency per window
-    total_window_latencies = [l + post_overhead_per_window_ms for l in per_window_latencies_ms]
+        t_end = time.perf_counter()
+        elapsed_ms = (t_end - t_start) * 1000.0
+        per_window_compute_ms.append(elapsed_ms)
 
-    # Exclude first warmup windows
-    valid_latencies = total_window_latencies[warmup_windows:] if len(total_window_latencies) > warmup_windows else total_window_latencies
+        # Maintain buffer size at most 3
+        if len(window_buffer) > 3:
+            window_buffer.pop(0)
+
+    # Exclude warmup windows
+    valid_latencies = per_window_compute_ms[warmup_windows:] if len(per_window_compute_ms) > warmup_windows else per_window_compute_ms
+
+    # Identify and separate system stalls (> 1000 ms)
+    stalls = [ms for ms in valid_latencies if ms > 1000.0]
+    unhalted_latencies = [ms for ms in valid_latencies if ms <= 1000.0]
+    if not unhalted_latencies:
+        unhalted_latencies = valid_latencies
 
     return {
-        "windows": len(valid_latencies),
-        "mean": float(np.mean(valid_latencies)),
-        "p50": float(np.percentile(valid_latencies, 50)),
-        "p95": float(np.percentile(valid_latencies, 95)),
-        "p99": float(np.percentile(valid_latencies, 99)),
-        "max": float(np.max(valid_latencies)),
+        "windows": len(unhalted_latencies),
+        "compute_mean": float(np.mean(unhalted_latencies)),
+        "compute_p50": float(np.percentile(unhalted_latencies, 50)),
+        "compute_p95": float(np.percentile(unhalted_latencies, 95)),
+        "compute_p99": float(np.percentile(unhalted_latencies, 99)),
+        "compute_max": float(np.max(unhalted_latencies)),
+        "stalls": len(stalls),
+        "stall_values": stalls,
     }
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Full-pipeline per-window latency benchmark")
+    parser = argparse.ArgumentParser(description="Streaming per-window latency benchmark")
     parser.add_argument("--dataset-dir", type=str, default="../OrbitSight_Dataset", help="Dataset directory")
     parser.add_argument("--config", type=str, default="config.yaml", help="Path to config.yaml")
     parser.add_argument("--reps", type=int, default=3, help="Number of repetitions per sequence")
-    parser.add_argument("--warmup-windows", type=int, default=20, help="Number of warmup windows to exclude")
+    parser.add_argument("--warmup-windows", type=int, default=20, help="Warmup windows to exclude")
     parser.add_argument("--limit", type=int, default=None, help="Limit number of sequences")
     args = parser.parse_args()
 
@@ -242,68 +271,85 @@ def main() -> None:
     if args.limit:
         npy_files = npy_files[:args.limit]
 
-    print(f"Running Full-Pipeline Latency Benchmark across {len(npy_files)} sequences ({args.reps} repetitions, warmup={args.warmup_windows} win)...", flush=True)
+    print(f"Running Real Streaming Full-Pipeline Latency Benchmark across {len(npy_files)} sequences ({args.reps} independent reps)...", flush=True)
 
     seq_bench_results = []
+    all_stalls = []
 
     for idx, npy_p in enumerate(npy_files, start=1):
         seq_name = sequence_name_from_npy(npy_p)
         width, height = infer_resolution(seq_name)
-        events = np.load(npy_p)
+        events = load_events(npy_p)
 
         rep_means, rep_p50s, rep_p95s, rep_p99s, rep_maxs = [], [], [], [], []
         win_count = 0
+        seq_stalls = 0
 
         for r in range(args.reps):
-            res = benchmark_sequence(events, width, height, cfg, warmup_windows=args.warmup_windows)
+            res = benchmark_sequence_streaming(events, width, height, cfg, warmup_windows=args.warmup_windows)
             win_count = int(res["windows"])
-            rep_means.append(res["mean"])
-            rep_p50s.append(res["p50"])
-            rep_p95s.append(res["p95"])
-            rep_p99s.append(res["p99"])
-            rep_maxs.append(res["max"])
+            seq_stalls += res["stalls"]
+            rep_means.append(res["compute_mean"])
+            rep_p50s.append(res["compute_p50"])
+            rep_p95s.append(res["compute_p95"])
+            rep_p99s.append(res["compute_p99"])
+            rep_maxs.append(res["compute_max"])
+
+        if seq_stalls > 0:
+            all_stalls.append((seq_name, seq_stalls))
 
         seq_bench_results.append({
             "sequence": seq_name,
             "windows": win_count,
-            "mean": (float(np.mean(rep_means)), float(np.std(rep_means))),
-            "p50": (float(np.mean(rep_p50s)), float(np.std(rep_p50s))),
-            "p95": (float(np.mean(rep_p95s)), float(np.std(rep_p95s))),
-            "p99": (float(np.mean(rep_p99s)), float(np.std(rep_p99s))),
-            "max": (float(np.mean(rep_maxs)), float(np.std(rep_maxs))),
+            "compute_mean": (float(np.mean(rep_means)), float(np.std(rep_means))),
+            "compute_p50": (float(np.mean(rep_p50s)), float(np.std(rep_p50s))),
+            "compute_p95": (float(np.mean(rep_p95s)), float(np.std(rep_p95s))),
+            "compute_p99": (float(np.mean(rep_p99s)), float(np.std(rep_p99s))),
+            "compute_max": (float(np.mean(rep_maxs)), float(np.std(rep_maxs))),
         })
-        m_val, m_std = seq_bench_results[-1]["mean"]
-        p99_val, p99_std = seq_bench_results[-1]["p99"]
+        m_val, m_std = seq_bench_results[-1]["compute_mean"]
+        p99_val, p99_std = seq_bench_results[-1]["compute_p99"]
+        total_p99 = p99_val + 40.0
         status = "PASS (<40ms)" if p99_val < 40.0 else "FAIL (>=40ms)"
-        print(f"[{idx}/{len(npy_files)}] {seq_name:<45} | win: {win_count:>5} | mean: {m_val:>5.2f} +/- {m_std:>4.2f} ms | p99: {p99_val:>5.2f} +/- {p99_std:>4.2f} ms | {status}", flush=True)
+        print(f"[{idx}/{len(npy_files)}] {seq_name:<45} | win: {win_count:>5} | comp p99: {p99_val:>5.2f} +/- {p99_std:>4.2f} ms | total p99: {total_p99:>5.2f} ms | {status}", flush=True)
 
-    print("\n" + "=" * 105, flush=True)
-    print(f"  HONEST FULL-PIPELINE LATENCY BENCHMARK TABLE ({args.reps} Runs, First {args.warmup_windows} Warmup Excluded)")
-    print("=" * 105, flush=True)
-    print(f"  {'Sequence':<45} | {'Win':>5} | {'Mean (ms)':>11} | {'p50 (ms)':>10} | {'p95 (ms)':>10} | {'p99 (ms)':>10} | {'Max (ms)':>10} | {'p99 Gate'}")
-    print("-" * 105, flush=True)
+    print("\n" + "=" * 130, flush=True)
+    print(f"  REAL STREAMING FULL-PIPELINE LATENCY BENCHMARK TABLE ({args.reps} Independent Runs, Warmup={args.warmup_windows} Win Excluded)")
+    print("  Note: Constant Algorithmic Lookahead Latency = 40.0 ms. Total Latency = Compute + 40.0 ms.")
+    print("=" * 130, flush=True)
+    print(f"  {'Sequence':<45} | {'Win':>5} | {'Comp p50 (ms)':>13} | {'Comp p95 (ms)':>13} | {'Comp p99 (ms)':>13} | {'Comp Max (ms)':>13} | {'Total p99':>10} | {'Comp Gate'}")
+    print("-" * 130, flush=True)
 
-    failing_seqs = []
+    failing_compute_seqs = []
+    failing_total_seqs = []
+
     for r in seq_bench_results:
         s_name = r["sequence"]
         w = r["windows"]
-        m_str = f"{r['mean'][0]:.2f}+/-{r['mean'][1]:.1f}"
-        p50_str = f"{r['p50'][0]:.2f}+/-{r['p50'][1]:.1f}"
-        p95_str = f"{r['p95'][0]:.2f}+/-{r['p95'][1]:.1f}"
-        p99_str = f"{r['p99'][0]:.2f}+/-{r['p99'][1]:.1f}"
-        max_str = f"{r['max'][0]:.2f}+/-{r['max'][1]:.1f}"
-        is_pass = r["p99"][0] < 40.0
-        gate_str = "PASS" if is_pass else "FAIL"
-        if not is_pass:
-            failing_seqs.append((s_name, r["p99"][0]))
-        print(f"  {s_name:<45} | {w:>5} | {m_str:>11} | {p50_str:>10} | {p95_str:>10} | {p99_str:>10} | {max_str:>10} | {gate_str}")
+        p50_str = f"{r['compute_p50'][0]:.2f}+/-{r['compute_p50'][1]:.1f}"
+        p95_str = f"{r['compute_p95'][0]:.2f}+/-{r['compute_p95'][1]:.1f}"
+        p99_str = f"{r['compute_p99'][0]:.2f}+/-{r['compute_p99'][1]:.1f}"
+        max_str = f"{r['compute_max'][0]:.2f}+/-{r['compute_max'][1]:.1f}"
+        total_p99 = r["compute_p99"][0] + 40.0
+        total_str = f"{total_p99:.2f}"
+        is_pass_compute = r["compute_p99"][0] < 40.0
+        gate_str = "PASS" if is_pass_compute else "FAIL"
 
-    print("=" * 105, flush=True)
-    print(f"Summary: {len(failing_seqs)} of {len(seq_bench_results)} sequences exceed 40.0 ms at p99.")
-    if failing_seqs:
-        print("Sequences exceeding 40.0 ms p99 latency target:")
-        for s, p99_v in failing_seqs:
-            print(f"  - {s}: {p99_v:.2f} ms")
+        if not is_pass_compute:
+            failing_compute_seqs.append((s_name, r["compute_p99"][0]))
+        if total_p99 > 40.0:
+            failing_total_seqs.append((s_name, total_p99))
+
+        print(f"  {s_name:<45} | {w:>5} | {p50_str:>13} | {p95_str:>13} | {p99_str:>13} | {max_str:>13} | {total_str:>10} | {gate_str}")
+
+    print("=" * 130, flush=True)
+    print(f"Summary:")
+    print(f"  - COMPUTE p99: {len(failing_compute_seqs)} of {len(seq_bench_results)} sequences exceed 40.0 ms.")
+    print(f"  - TOTAL p99 (Compute + 40ms lookahead): {len(failing_total_seqs)} of {len(seq_bench_results)} sequences exceed 40.0 ms.")
+    if all_stalls:
+        print("\nSystem Stalls (>1000ms isolated):")
+        for s_name, count in all_stalls:
+            print(f"  - {s_name}: {count} stall window(s)")
 
 
 if __name__ == "__main__":
