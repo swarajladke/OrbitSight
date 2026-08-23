@@ -26,36 +26,36 @@ Space Domain Awareness (SDA) is critical for spaceflight safety, collision avoid
 | Constraint / Requirement | Specification | Enforcement / Verification |
 |---|---|---|
 | **Temporal Windowing** | Fixed $\Delta t = 40,000\ \mu\text{s}$ ($40\text{ ms}$) non-overlapping slicing windows | `iter_windows(events, window_us=40000)` strictly uses timestamp column `3` |
-| **Streaming Compute Throughput** | Target $< 40.0\text{ ms}$ compute execution time per window | Measured compute p50: **8.98 – 52.08 ms**, compute p99: **19.15 – 175.99 ms** |
+| **Streaming Compute Throughput** | Target $< 40.0\text{ ms}$ compute execution time per window | Measured compute p50: **8.98 – 52.08 ms**, compute p99: **19.15 – 175.99 ms** (5 pass stably, 1 unstable) |
 | **Algorithmic Lookahead** | Disclosed 1-window ($40.0\text{ ms}$) future lookahead buffer ($t+1$) | Delivers $+92.2\%$ relative mAP gain on sparse tracks vs causal mode |
 | **Primary Metric** | Mean Average Precision at $\text{IoU} \ge 0.5$ ($\text{mAP}@0.5$) | Evaluated via authoritative single-source `src.metrics.iou` |
 | **Secondary Metrics** | Precision, Recall, $\text{F}_1$-score, False Positives count | Tracked across all training sequences in `src.scoreboard` |
 | **Sensor Generalization** | EVK4 ($1280\times 720$), DVXplorer ($640\times 480$), DAVIS346 ($346\times 260$) | Adaptive per-sensor morphology & continuous spatial activity maps |
-| **Prediction Format** | Tab-separated files with timestamps, bounding box, and confidence | Formatted as $(t_{\text{start}}, t_{\text{end}}, c_x, c_y, w, h, \text{confidence})$ across 3 naming variants |
+| **Prediction Format** | 9 tab-separated fields with timestamps, bounding box, class, and confidence | `sequence_id`, `window_start_timestamp_us`, `window_end_timestamp_us`, `center_x`, `center_y`, `width`, `height`, `class_id`, `confidence` |
 | **Container Contract** | Linux Docker container consuming `/OrbitSight_dataset` and writing `/work/<TEAM>/<DATE>` | Fully offline (`--network none`), headless OpenCV and shipping `.joblib` models |
-| **Zero Test Contamination** | 17 Training sequences for parameter tuning; 4 Test sequences strictly held out | Strict closed-scope protocol governed by `AGENTS.md` |
+| **Zero Test Contamination** | 17 Training sequences for tuning; 4 Test sequences held out (evaluated 3x for ranking checks) | Strict closed-scope protocol governed by `AGENTS.md` |
 
 ---
 
 ## 📈 Research & Development Progress
 
 ```
-[Phase 1: Baseline Heuristics] ────► [Phase 2: Static Background Map] ────► [Phase 3: Learned Candidate Re-Scorer]
-      mAP: 0.101145                        Hot pixel suppression                 Train ROC-AUC: 0.9984
-      FP: 172,683                          Sensor-tailored boxes                 Val ROC-AUC:   0.9300
+[Phase 1: Pre-Geometry Baseline] ────► [Phase 2: Continuous Static Map] ────► [Phase 3: Learned Candidate Scorer]
+      mAP: 0.155493                          Suppresses 0-97 px (0.00-0.04%)       Train ROC-AUC: 0.9984
+      FP:  13,146                            1 GT box lost in 2/21 seqs            Val ROC-AUC:   0.9300
                                                     │
                                                     ▼
 [Phase 5: Streaming Optimization] ◄─── [Phase 4: Two-Stage Objectness Gating]
-      Vectorized Component Binning         mAP: 0.163628 (+61.8%)
-      6/17 p99 Throughput Passes           F1:  0.371104 (+573%)
-      Lookahead Ablation Disclosed         FP:  6,918 (-165,765 FPs)
+      Vectorized Component Binning           mAP: 0.163628 (+5.2% vs Baseline)
+      5 Stably Passing Sequences             F1:  0.371104 (+21.3% vs Baseline)
+      Causal Ablation Disclosed              FP:  6,918 (-47.4% FPs vs Baseline)
 ```
 
-### Phase 1: Baseline Static Filtering & Heuristic Scoring
-- Initial naive connected-component detectors generated **172,683 false positives** across 17 training sequences due to hot pixels and starfields, resulting in low precision ($0.0299$) and mAP ($0.101145$).
+### Phase 1: Pre-Geometry Baseline Pipeline
+- Established reference pipeline operating point with sensor-tailored boxes and candidate classifier (`conf_min = 0.30, max_candidates_per_window = 1`), achieving **0.155493 mAP** and **13,146 false positives**.
 
 ### Phase 2: Continuous Background Activity Suppression & Sensor Specialization
-- Built `src/static_map.py` to accumulate continuous pixel event frequencies over sequence timelines. Thresholding at `static_thresh: 0.5` suppressed $>99\%$ of stationary hot pixels without target loss.
+- Built `src/static_map.py` to accumulate continuous pixel event frequencies over sequence timelines. Thresholding at `static_thresh: 0.5` suppresses 0–97 hot pixels ($0.00–0.04\%$ of sensor frame area), with exactly 1 GT box suppressed in each of 2 out of 21 total sequences.
 - Calibrated sensor-specific morphology: fixed bounding boxes for EVK4 ($52\times 56$) and DVX ($18\times 18$), and dynamic extent-padded boxes for DAVIS ($10\times 12$).
 
 ### Phase 3: Learned Motion & Spatial Re-Scorer
@@ -65,7 +65,7 @@ Space Domain Awareness (SDA) is critical for spaceflight safety, collision avoid
 ### Phase 4: Two-Stage Temporal Window Objectness Gating
 - Trained a sequence-level window objectness classifier on 21-D temporal window statistics (`models/scorer_objectness_pre_geometry.joblib`).
 - Gating candidate scores by window objectness probability: `g_conf = score * p_obj` with threshold `0.30`.
-- **mAP increased to `0.163628` (+61.8% relative gain over baseline)**, **F1 surged to `0.371104` (+573% gain)**, and **false alarms plummeted from 172,683 down to 6,918** (165,765 false alarms eliminated).
+- **mAP increased to `0.163628` (+5.2% relative gain over baseline)**, **F1 surged to `0.371104` (+21.3% gain)**, and **false alarms plunged from 13,146 down to 6,918** (47.4% false alarm reduction).
 
 ### Phase 5: Streaming Pipeline Optimization & Real-Time Profiling
 - Replaced iterative component loops with vectorized `np.bincount` event summation and bounded candidate sorting (`max_components_per_window: 64`).
@@ -83,27 +83,27 @@ Authoritative scoreboard evaluation across the **17 Training Sequences** (15,292
 | **Learned Baseline** | Learned | `0.05`, `k=2` | 0.155493 | 0.281011 | 0.335993 | 0.306052 | **5,138** | 13,146 | 10,154 |
 | **OrbitSight Final (Locked)** | **Learned + Objectness** | **`0.30`, `k=1`** | **0.163628** | **0.422441** | **0.330892** | **0.371104** | **5,060** | **6,918** | **10,232** |
 
-### Per-Sequence AP@0.5 Comparison across All 17 Training Sequences
+### Per-Sequence AP@0.5 Breakdown across All 17 Training Sequences
 
-| Target Sequence Name | Track Type | Sensor | Ground Truth Count | Baseline AP | OrbitSight Final AP | Absolute $\Delta$ |
-|---|---|---|---|---|---|---|
-| `2025_12_23_21_12_28_EVK4_mag5.2` | Dense ($>43$) | EVK4 | 1,203 | 0.4960 | **0.6122** | +0.1162 |
-| `DAVIS_COSMOS1933_18958_2024-12-04-18-37-01` | Sparse ($\le 43$) | DAVIS | 43 | 0.0853 | **0.0853** | +0.0000 |
-| `DAVIS_EGS_16908_2024-11-01-19-10-44` | Dense ($>43$) | DAVIS | 3,140 | 0.3275 | **0.3447** | +0.0172 |
-| `DAVIS_Filtered_NOAA6_11416_2025-01-13-19-51-06` | Dense ($>43$) | DAVIS | 1,158 | 0.0181 | **0.0181** | +0.0000 |
-| `DAVIS_RESURSDK1_29228_2024-12-04-18-37-01` | Sparse ($\le 43$) | DAVIS | 23 | 0.0870 | **0.1348** | +0.0478 |
-| `DAVIS_SL12RB2_15772_2024-12-04-18-21-37` | Sparse ($\le 43$) | DAVIS | 8 (or 0) | 0.0714 | **0.0000** | -0.0714 |
-| `DAVIS_SL16RB_20625_2024-12-04-19-34-18` | Dense ($>43$) | DAVIS | 197 | 0.0222 | **0.1824** | +0.1602 |
-| `DAVIS_SL16RB_26070_2024-12-04-19-14-39` | Sparse ($\le 43$) | DAVIS | 10 | 0.1039 | **0.0900** | -0.0139 |
-| `DAVIS_SL8RB_2025-01-13-19-15-36` | Dense ($>43$) | DAVIS | 5,605 | 0.2052 | **0.2390** | +0.0338 |
-| `DVX_Filtered_ACS3_59588_2025-01-20-19-35-44` | Sparse ($\le 43$) | DVX | 12 | 0.0750 | **0.0750** | +0.0000 |
-| `DVX_Filtered_BlockDM_SLRB_32405_2025-01-20-19-57-17` | Dense ($>43$) | DVX | 478 | 0.1467 | **0.2181** | +0.0714 |
-| `DVX_Filtered_NOAA15_25338_2025-01-20-19-25-07` | Sparse ($\le 43$) | DVX | 26 | 0.0909 | **0.0909** | +0.0000 |
-| `DVX_Filtered_NOAA16_26536_2025-01-20-19-46-50` | Sparse ($\le 43$) | DVX | 34 | 0.0882 | **0.0882** | +0.0000 |
-| `DVX_Filtered_NOAA6_11416_2025-01-20-19-11-35` | Sparse ($\le 43$) | DVX | 14 | 0.0714 | **0.0714** | +0.0000 |
-| `DVX_Filtered_Stars2_2025-01-20-19-57-17` | Sparse ($\le 43$) | DVX | 9 | 0.0671 | **0.2037** | +0.1366 |
-| `DVX_Filtered_Stars_2025-01-20-19-15-10` | Dense ($>43$) | DVX | 3,326 | 0.1387 | **0.1863** | +0.0476 |
-| `DVX_NOAA6_11416_2025-01-20-19-06-31` | Sparse ($\le 43$) | DVX | 6 | 0.0417 | **0.0417** | +0.0000 |
+| Target Sequence Name | Track Type | Sensor | Ground Truth Instances | OrbitSight Final AP@0.5 |
+|---|---|---|---|---|
+| `2025_12_23_21_12_28_EVK4_mag5.2` | Dense ($>43$) | EVK4 | 1,203 | **0.6122** |
+| `DAVIS_COSMOS1933_18958_2024-12-04-18-37-01` | Sparse ($\le 43$) | DAVIS | 43 | **0.0853** |
+| `DAVIS_EGS_16908_2024-11-01-19-10-44` | Dense ($>43$) | DAVIS | 3,140 | **0.3447** |
+| `DAVIS_Filtered_NOAA6_11416_2025-01-13-19-51-06` | Dense ($>43$) | DAVIS | 1,158 | **0.0181** |
+| `DAVIS_RESURSDK1_29228_2024-12-04-18-37-01` | Sparse ($\le 43$) | DAVIS | 23 | **0.1348** |
+| `DAVIS_SL12RB2_15772_2024-12-04-18-21-37` | Sparse ($\le 43$) | DAVIS | 0 (or 8) | **0.0000** |
+| `DAVIS_SL16RB_20625_2024-12-04-19-34-18` | Dense ($>43$) | DAVIS | 197 | **0.1824** |
+| `DAVIS_SL16RB_26070_2024-12-04-19-14-39` | Sparse ($\le 43$) | DAVIS | 10 | **0.0900** |
+| `DAVIS_SL8RB_2025-01-13-19-15-36` | Dense ($>43$) | DAVIS | 5,605 | **0.2390** |
+| `DVX_Filtered_ACS3_59588_2025-01-20-19-35-44` | Sparse ($\le 43$) | DVX | 12 | **0.0750** |
+| `DVX_Filtered_BlockDM_SLRB_32405_2025-01-20-19-57-17` | Dense ($>43$) | DVX | 478 | **0.2181** |
+| `DVX_Filtered_NOAA15_25338_2025-01-20-19-25-07` | Sparse ($\le 43$) | DVX | 26 | **0.0909** |
+| `DVX_Filtered_NOAA16_26536_2025-01-20-19-46-50` | Sparse ($\le 43$) | DVX | 34 | **0.0882** |
+| `DVX_Filtered_NOAA6_11416_2025-01-20-19-11-35` | Sparse ($\le 43$) | DVX | 14 | **0.0714** |
+| `DVX_Filtered_Stars2_2025-01-20-19-57-17` | Sparse ($\le 43$) | DVX | 9 | **0.2037** |
+| `DVX_Filtered_Stars_2025-01-20-19-15-10` | Dense ($>43$) | DVX | 3,326 | **0.1863** |
+| `DVX_NOAA6_11416_2025-01-20-19-06-31` | Sparse ($\le 43$) | DVX | 6 | **0.0417** |
 
 ---
 
@@ -113,7 +113,7 @@ OrbitSight operates as a sliding 3-window streaming buffer ($t-1, t, t+1$).
 
 - **Compute Throughput Budget**: Compute latency per window must fit within the $40.0\text{ ms}$ temporal arrival rate to prevent queue backlog.
 - **Algorithmic Lookahead Latency**: Fixed **$40.0\text{ ms}$** algorithmic lookahead due to 1 future buffer window ($t+1$).
-- **Streaming Status**: **6 of 17 sequences** pass the $\text{Compute } p_{99} < 40\text{ ms}$ throughput budget under full streaming load. 11 sequences exceed $40\text{ ms}$ compute $p_{99}$ during heavy event bursts ($>10\text{M}$ events/sequence or starfield clutter).
+- **Streaming Status**: **5 sequences pass stably** ($p_{99} < 40\text{ ms}$); **1 sequence is within measurement noise** (`DAVIS_Filtered_NOAA6`: $38.95 \pm 13.9\text{ ms}$, marked UNSTABLE); **11 sequences exceed $40\text{ ms}$ compute $p_{99}$** during heavy event bursts ($>10\text{M}$ events/sequence or starfield clutter).
 
 ### Measured Per-Sequence Compute Latency Table (3 Independent Runs)
 
@@ -122,8 +122,8 @@ OrbitSight operates as a sliding 3-window streaming buffer ($t-1, t, t+1$).
 | `2025_12_23_21_12_28_EVK4_mag5.2` | 2,060 | $52.08 \pm 5.2$ | $98.97 \pm 7.3$ | $175.99 \pm 50.2$ | $555.93 \pm 250.1$ | Over Budget (High Res $1280\times 720$) |
 | `DAVIS_COSMOS1933_18958` | 7,664 | $16.57 \pm 0.5$ | $31.23 \pm 3.4$ | $58.45 \pm 10.5$ | $747.53 \pm 215.6$ | Over Budget (Burst Event Noise) |
 | `DAVIS_EGS_16908` | 10,682 | $17.67 \pm 3.2$ | $47.93 \pm 31.5$ | $117.91 \pm 106.5$ | $545.24 \pm 281.0$ | Over Budget (Dense Cluster Spikes) |
-| `DAVIS_Filtered_NOAA6_11416` | 3,801 | $10.34 \pm 0.6$ | $20.44 \pm 2.9$ | $38.95 \pm 13.9$ | $226.78 \pm 149.8$ | **PASS (<40 ms)** |
-| `DAVIS_RESURSDK1_29228` | 6,866 | $16.96 \pm 2.4$ | $29.64 \pm 0.6$ | $40.03 \pm 1.7$ | $450.73 \pm 228.7$ | Borderline ($40.03\text{ ms}$) |
+| `DAVIS_Filtered_NOAA6_11416` | 3,801 | $10.34 \pm 0.6$ | $20.44 \pm 2.9$ | $38.95 \pm 13.9$ | $226.78 \pm 149.8$ | **UNSTABLE ($\sigma > 25\%$)** |
+| `DAVIS_RESURSDK1_29228` | 6,866 | $16.96 \pm 2.4$ | $29.64 \pm 0.6$ | $40.03 \pm 1.7$ | $450.73 \pm 228.7$ | Over Budget ($40.03\text{ ms}$) |
 | `DAVIS_SL12RB2_15772` | 1,674 | $11.82 \pm 0.1$ | $24.97 \pm 0.3$ | $28.72 \pm 0.2$ | $58.12 \pm 37.8$ | **PASS (<40 ms)** |
 | `DAVIS_SL16RB_20625` | 7,078 | $11.37 \pm 0.1$ | $24.90 \pm 0.2$ | $28.58 \pm 0.1$ | $139.07 \pm 69.6$ | **PASS (<40 ms)** |
 | `DAVIS_SL16RB_26070` | 1,483 | $11.75 \pm 0.2$ | $25.33 \pm 0.2$ | $29.38 \pm 0.2$ | $31.67 \pm 0.2$ | **PASS (<40 ms)** |
@@ -133,7 +133,7 @@ OrbitSight operates as a sliding 3-window streaming buffer ($t-1, t, t+1$).
 | `DVX_Filtered_NOAA15_25338` | 11,336 | $20.77 \pm 3.7$ | $33.56 \pm 5.7$ | $48.62 \pm 19.6$ | $618.03 \pm 301.0$ | Over Budget (Background Activity) |
 | `DVX_Filtered_NOAA16_26536` | 11,226 | $32.56 \pm 0.1$ | $40.13 \pm 0.2$ | $50.96 \pm 1.3$ | $549.74 \pm 126.6$ | Over Budget (Persistent Clutter) |
 | `DVX_Filtered_NOAA6_11416` | 3,245 | $32.32 \pm 0.1$ | $39.45 \pm 0.7$ | $48.49 \pm 2.1$ | $238.91 \pm 159.1$ | Over Budget (Background Activity) |
-| `DVX_Filtered_Stars2_2025-01-20` | 191 | $32.18 \pm 0.1$ | $36.74 \pm 0.2$ | $41.92 \pm 1.4$ | $45.77 \pm 3.7$ | Borderline ($41.92\text{ ms}$) |
+| `DVX_Filtered_Stars2_2025-01-20` | 191 | $32.18 \pm 0.1$ | $36.74 \pm 0.2$ | $41.92 \pm 1.4$ | $45.77 \pm 3.7$ | Over Budget ($41.92\text{ ms}$) |
 | `DVX_Filtered_Stars_2025-01-20` | 12,077 | $25.30 \pm 4.8$ | $39.67 \pm 4.6$ | $73.76 \pm 16.7$ | $755.49 \pm 49.7$ | Over Budget (Starfield Clutter) |
 | `DVX_NOAA6_11416_2025-01-20` | 5,618 | $27.69 \pm 1.7$ | $48.59 \pm 2.9$ | $69.28 \pm 13.2$ | $339.46 \pm 127.9$ | Over Budget (22M Raw Events) |
 
@@ -209,7 +209,8 @@ For every candidate bounding box, OrbitSight computes:
 ├── AGENTS.md                 # Operating protocol & validation rules
 ├── models/
 │   ├── scorer_pregeom.joblib                   # Stage 1: Candidate Classifier model
-│   └── scorer_objectness_pre_geometry.joblib   # Stage 2: Temporal Window Objectness Gate
+│   ├── scorer_objectness_pre_geometry.joblib   # Stage 2: Temporal Window Objectness Gate
+│   └── model_structure.json                    # Model metadata and hyperparameter schemas
 └── src/
     ├── common.py             # Event I/O, resolution inference, window slicing
     ├── detector.py           # Morphology, percentile filtering, connected components
@@ -222,6 +223,8 @@ For every candidate bounding box, OrbitSight computes:
     ├── filter_preds.py       # Post-hoc confidence and Top-K filter utility
     ├── metrics.py            # Strict IoU and precision-recall metrics
     ├── latency_bench.py      # Real streaming per-window latency benchmark
+    ├── component_rank.py     # Connected component rank profiling tool
+    ├── visualize.py          # Headless event stream & bounding box video renderer
     ├── ablation_causal.py    # Causal streaming ablation evaluation suite
     └── sweep.py              # Detector parameter sweep engine
 ```
@@ -256,10 +259,10 @@ Generate predictions for all sequences in the dataset directory:
 python -m src.infer --input_dir ../OrbitSight_Dataset/Training_sets --output_dir predictions --config config.yaml
 ```
 
-Output format for each sequence (emits 9 fields per detection across `<seq>_pred.txt`, `<seq>_bb_windows_40ms.txt`, and `<seq>.txt`):
+Output format for each sequence (emits 9 tab-separated fields across `<seq>_pred.txt`, `<seq>_bb_windows_40ms.txt`, and `<seq>.txt`):
 ```tsv
-sequence_name	window_index	window_start_timestamp_us	window_end_timestamp_us	center_x	center_y	width	height	confidence
-2025_12_23_21_12_28_EVK4_mag5.2	0	1734988346000000	1734988346040000	320.0	240.0	52	56	0.845200
+sequence_id	window_start_timestamp_us	window_end_timestamp_us	center_x	center_y	width	height	class_id	confidence
+2025_12_23_21_12_28_EVK4_mag5.2	1734988346000000	1734988346040000	320.0	240.0	52	56	0	0.8452
 ```
 
 ### 3. Evaluate Scoreboard
@@ -276,6 +279,14 @@ Benchmark true streaming per-window execution times across sequences:
 
 ```bash
 python -m src.latency_bench --dataset-dir ../OrbitSight_Dataset/Training_sets --config config.yaml --reps 3 --warmup-windows 20
+```
+
+### 5. Video Visualization
+
+Render headless MP4 videos of event accumulation frames overlaid with predictions (in orange) and ground truth (in green):
+
+```bash
+python -m src.visualize --npy path/to/events.npy --pred path/to/pred.txt --gt path/to/gt.txt --out video.mp4 --fps 25 --max-windows 300
 ```
 
 ---
