@@ -2,8 +2,8 @@
 
 [![Python 3.11](https://img.shields.io/badge/python-3.11-blue.svg)](https://www.python.org/downloads/release/python-3110/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Real-Time](https://img.shields.io/badge/Latency-15.30ms%2Fwindow-brightgreen.svg)](#inference-latency--real-time-performance)
-[![Scoreboard mAP](https://img.shields.io/badge/mAP%400.5-0.155493-success.svg)](#benchmark-performance)
+[![Real-Time](https://img.shields.io/badge/Latency-18.04ms%2Fwindow-brightgreen.svg)](#real-streaming-latency--real-time-performance)
+[![Scoreboard mAP](https://img.shields.io/badge/mAP%400.5-0.163628-success.svg)](#benchmark-performance)
 
 **OrbitSight** is a high-performance, real-time neuromorphic space domain awareness (SDA) pipeline designed to detect and track low-Earth orbit (LEO), medium-Earth orbit (MEO), and geostationary (GEO) satellites and orbital debris using event-based neuromorphic vision sensors (Prophesee EVK4, iniVation DAVIS240C, and DVXplorer).
 
@@ -77,24 +77,77 @@ Space Domain Awareness (SDA) is critical for spaceflight safety, collision avoid
 
 Authoritative scoreboard evaluation across the **17 Training Sequences** (15,292 ground-truth bounding box instances):
 
-| Pipeline Configuration | Scorer Mode | Operating Point (`conf_min`, `top_k`) | mAP@0.5 | Precision | Recall | F1 Score | TP | FP | Latency (ms/win) |
+| Pipeline Configuration | Scorer Mode | Operating Point (`conf_min`, `top_k`) | mAP@0.5 | Precision | Recall | F1 Score | TP | FP | FN |
 |---|---|---|---|---|---|---|---|---|---|
-| **Baseline Heuristic** | Weighted | `0.05`, `k=2` | 0.101145 | 0.029947 | **0.348614** | 0.055156 | 5,331 | 172,683 | 11.86 ms |
-| **Learned Baseline** | Learned | `0.05`, `k=2` | 0.154898 | 0.152137 | 0.350248 | 0.212131 | **5,356** | 29,849 | 17.49 ms |
-| **OrbitSight Final (Locked)** | **Learned** | **`0.30`, `k=1`** | **0.155493** | **0.281011** | **0.335993** | **0.306052** | **5,138** | **13,146** | **15.30 ms** |
+| **Baseline Heuristic** | Weighted | `0.05`, `k=2` | 0.101145 | 0.029947 | **0.348614** | 0.055156 | 5,331 | 172,683 | 9,961 |
+| **Learned Baseline** | Learned | `0.05`, `k=2` | 0.154898 | 0.152137 | 0.350248 | 0.212131 | **5,356** | 29,849 | 9,936 |
+| **OrbitSight Final (Locked)** | **Learned + Objectness** | **`0.30`, `k=1`** | **0.163628** | **0.422441** | **0.330892** | **0.371104** | **5,060** | **6,918** | **10,232** |
 
 ### Per-Sequence AP@0.5 Comparison
 
 | Target Sequence | Sensor | Ground Truth Instances | Baseline AP | OrbitSight Final AP | Absolute $\Delta$ | Relative Gain |
 |---|---|---|---|---|---|---|
-| `2025_12_23_21_12_28_EVK4_mag5.2` | EVK4 | 1,203 | 0.4960 | **0.5966** | +0.1006 | **+20.3%** |
-| `DAVIS_EGS_16908_2024-11-01-19-10-44` | DAVIS | 3,140 | 0.3275 | **0.3652** | +0.0377 | **+11.5%** |
-| `DVX_Filtered_BlockDM_SLRB_32405` | DVX | 478 | 0.1467 | **0.2241** | +0.0774 | **+52.8%** |
-| `DVX_Filtered_Stars2_2025-01-20-19-57-17` | DVX | 9 | 0.0671 | **0.2963** | +0.2292 | **+341.6%** |
-| `DAVIS_SL16RB_20625_2024-12-04-19-34-18` | DAVIS | 197 | 0.0222 | **0.1984** | +0.1762 | **+793.7%** |
-| `DAVIS_SL12RB2_15772_2024-12-04-18-21-37` | DAVIS | 8 | 0.0714 | **0.1875** | +0.1161 | **+162.6%** |
-| `DAVIS_SL16RB_26070_2024-12-04-19-14-39` | DAVIS | 10 | 0.1039 | **0.1250** | +0.0211 | **+20.3%** |
-| `DVX_Filtered_Stars_2025-01-20-19-15-10` | DVX | 3,326 | 0.1387 | **0.1870** | +0.0483 | **+34.8%** |
+| `2025_12_23_21_12_28_EVK4_mag5.2` | EVK4 | 1,203 | 0.4960 | **0.6122** | +0.1162 | **+23.4%** |
+| `DAVIS_EGS_16908_2024-11-01-19-10-44` | DAVIS | 3,140 | 0.3275 | **0.3447** | +0.0172 | **+5.3%** |
+| `DVX_Filtered_BlockDM_SLRB_32405` | DVX | 478 | 0.1467 | **0.2181** | +0.0714 | **+48.7%** |
+| `DVX_Filtered_Stars2_2025-01-20-19-57-17` | DVX | 9 | 0.0671 | **0.2037** | +0.1366 | **+203.6%** |
+| `DAVIS_SL16RB_20625_2024-12-04-19-34-18` | DAVIS | 197 | 0.0222 | **0.1824** | +0.1602 | **+721.6%** |
+| `DAVIS_SL16RB_26070_2024-12-04-19-14-39` | DAVIS | 10 | 0.1039 | **0.0900** | -0.0139 | -13.4% |
+| `DVX_Filtered_Stars_2025-01-20-19-15-10` | DVX | 3,326 | 0.1387 | **0.1863** | +0.0476 | **+34.3%** |
+| `DAVIS_SL8RB_2025-01-13-19-15-36` | DAVIS | 5,605 | 0.2052 | **0.2390** | +0.0338 | **+16.5%** |
+| `DAVIS_RESURSDK1_29228_2024-12-04-18-37-01` | DAVIS | 23 | 0.0870 | **0.1348** | +0.0478 | **+54.9%** |
+
+---
+
+## ⏱️ Real Streaming Latency & Real-Time Performance
+
+The benchmark measures per-window compute latency in a true streaming sliding buffer loop (holding windows $t-1, t, t+1$). The timer starts the instant window $t+1$ events arrive and finishes after window $t$ NMS and final prediction formatting are complete.
+
+- **Algorithmic Latency**: Exactly **$40.0\text{ ms}$** fixed lookahead from the 1-window temporal buffer ($t+1$).
+- **Compute Latency**: Real measured per-window execution time across 3 independent repetitions (warmup excluded).
+- **Total End-to-End Latency**: $\text{Compute Latency} + 40.0\text{ ms}$.
+
+### Measured Per-Sequence Latency Table (3 Independent Runs)
+
+| Sequence Name | Windows | Compute p50 (ms) | Compute p95 (ms) | Compute p99 (ms) | Compute Max (ms) | Total p99 Latency |
+|---|---|---|---|---|---|---|
+| `2025_12_23_21_12_28_EVK4_mag5.2` | 2,060 | $52.08 \pm 5.2$ | $98.97 \pm 7.3$ | $175.99 \pm 50.2$ | $555.93 \pm 250.1$ | **215.99 ms** |
+| `DAVIS_COSMOS1933_18958` | 7,664 | $16.57 \pm 0.5$ | $31.23 \pm 3.4$ | $58.45 \pm 10.5$ | $747.53 \pm 215.6$ | **98.45 ms** |
+| `DAVIS_EGS_16908` | 10,682 | $17.67 \pm 3.2$ | $47.93 \pm 31.5$ | $117.91 \pm 106.5$ | $545.24 \pm 281.0$ | **157.91 ms** |
+| `DAVIS_Filtered_NOAA6_11416` | 3,801 | $10.34 \pm 0.6$ | $20.44 \pm 2.9$ | $38.95 \pm 13.9$ | $226.78 \pm 149.8$ | **78.95 ms** |
+| `DAVIS_RESURSDK1_29228` | 6,866 | $16.96 \pm 2.4$ | $29.64 \pm 0.6$ | $40.03 \pm 1.7$ | $450.73 \pm 228.7$ | **80.03 ms** |
+| `DAVIS_SL12RB2_15772` | 1,674 | $11.82 \pm 0.1$ | $24.97 \pm 0.3$ | $28.72 \pm 0.2$ | $58.12 \pm 37.8$ | **68.72 ms** |
+| `DAVIS_SL16RB_20625` | 7,078 | $11.37 \pm 0.1$ | $24.90 \pm 0.2$ | $28.58 \pm 0.1$ | $139.07 \pm 69.6$ | **68.58 ms** |
+| `DAVIS_SL16RB_26070` | 1,483 | $11.75 \pm 0.2$ | $25.33 \pm 0.2$ | $29.38 \pm 0.2$ | $31.67 \pm 0.2$ | **69.38 ms** |
+| `DAVIS_SL8RB_2025-01-13` | 7,603 | $8.98 \pm 0.1$ | $16.81 \pm 0.1$ | $19.15 \pm 1.7$ | $184.72 \pm 220.6$ | **59.15 ms** |
+| `DVX_Filtered_ACS3_59588` | 10,774 | $19.63 \pm 2.5$ | $37.31 \pm 11.6$ | $79.41 \pm 67.3$ | $352.10 \pm 249.5$ | **119.41 ms** |
+| `DVX_Filtered_BlockDM_SLRB_32405` | 2,470 | $18.04 \pm 0.1$ | $29.18 \pm 0.2$ | $31.17 \pm 0.1$ | $97.94 \pm 74.1$ | **71.17 ms** |
+| `DVX_Filtered_NOAA15_25338` | 11,336 | $20.77 \pm 3.7$ | $33.56 \pm 5.7$ | $48.62 \pm 19.6$ | $618.03 \pm 301.0$ | **88.62 ms** |
+| `DVX_Filtered_NOAA16_26536` | 11,226 | $32.56 \pm 0.1$ | $40.13 \pm 0.2$ | $50.96 \pm 1.3$ | $549.74 \pm 126.6$ | **90.96 ms** |
+| `DVX_Filtered_NOAA6_11416` | 3,245 | $32.32 \pm 0.1$ | $39.45 \pm 0.7$ | $48.49 \pm 2.1$ | $238.91 \pm 159.1$ | **88.49 ms** |
+| `DVX_Filtered_Stars2_2025-01-20` | 191 | $32.18 \pm 0.1$ | $36.74 \pm 0.2$ | $41.92 \pm 1.4$ | $45.77 \pm 3.7$ | **81.92 ms** |
+| `DVX_Filtered_Stars_2025-01-20` | 12,077 | $25.30 \pm 4.8$ | $39.67 \pm 4.6$ | $73.76 \pm 16.7$ | $755.49 \pm 49.7$ | **113.76 ms** |
+| `DVX_NOAA6_11416_2025-01-20` | 5,618 | $27.69 \pm 1.7$ | $48.59 \pm 2.9$ | $69.28 \pm 13.2$ | $339.46 \pm 127.9$ | **109.28 ms** |
+
+---
+
+## 🔬 Causal-Variant Ablation Analysis
+
+To quantify the exact value of the 1-window lookahead ($40.0\text{ ms}$ algorithmic latency), a causal variant of OrbitSight was ablated and evaluated across all 17 training sequences with all future-lookahead features zeroed ($t+1$ forward displacement, forward speed, and future window objectness statistics):
+
+| Metric | Full OrbitSight (1-Window Lookahead) | Causal Variant (Zero Lookahead) | Absolute $\Delta$ |
+|---|---|---|---|
+| **Overall Train mAP** | **0.163628** | 0.137223 | **-0.026405 (-16.1%)** |
+| **Sparse Track mAP** ($\le 50\text{ GT}$) | **0.098205** | 0.051086 | **-0.047119 (-48.0%)** |
+| **Dense Track mAP** ($> 50\text{ GT}$) | 0.257091 | **0.260275** | +0.003184 (+1.2%) |
+| **Precision** | **0.422441** | 0.416869 | -0.005572 |
+| **Recall** | 0.330892 | **0.337431** | +0.006539 |
+| **F1 Score** | 0.371104 | **0.372967** | +0.001863 |
+| **True Positives (TP)** | 5,060 | **5,160** | +100 |
+| **False Positives (FP)** | **6,918** | 7,218 | +300 |
+| **False Negatives (FN)** | 10,232 | **10,132** | -100 |
+
+**Finding**: The 1-window lookahead provides a crucial **$+48.0\%$ relative mAP boost on sparse sequences** by eliminating transient single-window noise artifacts through temporal bi-directional verification. On dense sequences, causal tracking maintains accuracy due to high target continuity.
 
 ---
 
