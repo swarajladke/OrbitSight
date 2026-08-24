@@ -69,7 +69,7 @@ Space Domain Awareness (SDA) is critical for spaceflight safety, collision avoid
 
 ### Phase 5: Streaming Pipeline Optimization & Real-Time Profiling
 - Replaced iterative component loops with vectorized `np.bincount` event summation and bounded candidate sorting (`max_components_per_window: 64`).
-- Validated via `src/component_rank.py` that maximum true target component rank across all 15,290 windows is **26** ($p_{99} = 5.0$), ensuring zero candidate truncation.
+- Validated via `src/component_rank.py` that maximum true target component rank across all 15,292 windows is **32** ($p_{99} = 6.0$, with matched = 5,647 $\ge$ 5,060 pipeline TPs), confirming zero candidate truncation on the 17 training sequences.
 - Profiled full per-window streaming latency across 3 independent runs without synthetic amortization constants.
 
 ---
