@@ -13,7 +13,14 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
-from src.common import WINDOW_US, infer_resolution, iter_windows, load_events, sequence_name_from_npy
+from src.common import (
+    WINDOW_US,
+    event_image,
+    infer_resolution,
+    iter_windows,
+    load_events,
+    sequence_name_from_npy,
+)
 from src.detector import detect_boxes
 from src.infer import load_config
 from src.metrics import iou, windows_overlap
@@ -99,10 +106,18 @@ def profile_sequence_component_ranks(
                 })
             continue
 
-        # Run exact detector connected-component extraction and box construction
-        candidate_boxes = detect_boxes(
-            w_events, width, height, static_mask, cfg=profile_cfg
-        )
+        # Generate event count image and run exact detector connected-component extraction
+        count_img, _, _ = event_image(w_events, width, height, need_polarity=False)
+        candidate_boxes = detect_boxes(count_img, width, height, cfg=profile_cfg)
+        if static_mask is not None and candidate_boxes:
+            filtered_boxes: List[Dict[str, float]] = []
+            for b in candidate_boxes:
+                cy_r = int(round(b["center_y"]))
+                cx_r = int(round(b["center_x"]))
+                if 0 <= cy_r < height and 0 <= cx_r < width and static_mask[cy_r, cx_r]:
+                    continue
+                filtered_boxes.append(b)
+            candidate_boxes = filtered_boxes
 
         total_comps = len(candidate_boxes)
         if total_comps == 0:
