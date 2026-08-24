@@ -86,7 +86,7 @@ def process_sequence(
     cfg: Dict[str, Any],
     max_windows: float = float("inf"),
     time_budget_sec: Optional[float] = None,
-) -> Tuple[float, int]:
+) -> Tuple[float, int, List[float]]:
     """Process single event sequence file via unified pipeline, write predictions."""
     start_time = time.perf_counter()
     deadline_ts = (
@@ -105,15 +105,39 @@ def process_sequence(
     width, height = infer_resolution(seq_name, events[:, 0], events[:, 1])
     window_us = int(cfg.get("window_us", WINDOW_US))
 
-    predictions, num_windows = run_sequence(
-        events,
-        width,
-        height,
-        cfg,
-        window_us=window_us,
-        max_windows=max_windows,
-        deadline_ts=deadline_ts,
-    )
+    # Instrument per-window compute timing during unified pipeline execution
+    import src.pipeline as pipeline_mod
+    orig_iter = pipeline_mod.iter_windows
+    pass1_times: List[float] = []
+
+    def instrumented_iter(ev_arr, window_us=WINDOW_US):
+        gen = orig_iter(ev_arr, window_us)
+        for item in gen:
+            t0 = time.perf_counter()
+            yield item
+            t1 = time.perf_counter()
+            pass1_times.append((t1 - t0) * 1000.0)
+
+    pipeline_mod.iter_windows = instrumented_iter
+    try:
+        predictions, num_windows = run_sequence(
+            events,
+            width,
+            height,
+            cfg,
+            window_us=window_us,
+            max_windows=max_windows,
+            deadline_ts=deadline_ts,
+        )
+    finally:
+        pipeline_mod.iter_windows = orig_iter
+
+    total_elapsed_ms = (time.perf_counter() - start_time) * 1000.0
+    if len(pass1_times) > 0:
+        win_times = pass1_times[:num_windows]
+    else:
+        avg_w = total_elapsed_ms / num_windows if num_windows > 0 else 0.0
+        win_times = [avg_w] * num_windows
 
     if deadline_ts is not None and time.monotonic() >= deadline_ts:
         print(
@@ -139,8 +163,7 @@ def process_sequence(
         with open(out_p, "w", encoding="utf-8", newline="\n") as f:
             f.write(content)
 
-    elapsed_ms = (time.perf_counter() - start_time) * 1000.0
-    return elapsed_ms, num_windows
+    return total_elapsed_ms, num_windows, win_times
 
 
 def main() -> None:
@@ -244,7 +267,7 @@ def main() -> None:
             f"\n[{idx}/{len(npy_files)}] Starting sequence processing: {seq_name}...",
             flush=True,
         )
-        seq_ms, num_w = process_sequence(
+        seq_ms, num_w, win_times = process_sequence(
             npy_file,
             output_dir,
             cfg,
@@ -254,29 +277,43 @@ def main() -> None:
         ms_per_window = seq_ms / num_w if num_w > 0 else 0.0
         total_time_ms += seq_ms
         total_windows += num_w
-        seq_latency_records.append((seq_name, num_w, seq_ms, ms_per_window))
+        
+        if win_times:
+            w_arr = np.array(win_times, dtype=np.float64)
+            p50 = float(np.percentile(w_arr, 50))
+            p95 = float(np.percentile(w_arr, 95))
+            p99 = float(np.percentile(w_arr, 99))
+            mx = float(np.max(w_arr))
+        else:
+            p50, p95, p99, mx = ms_per_window, ms_per_window, ms_per_window, ms_per_window
+
+        seq_latency_records.append((seq_name, num_w, seq_ms, ms_per_window, p50, p95, p99, mx))
         print(
-            f"Done '{seq_name}': {seq_ms:.2f} ms total, {ms_per_window:.2f} ms/window across {num_w} windows.",
+            f"Done '{seq_name}': {seq_ms:.2f} ms total, {ms_per_window:.2f} ms/window across {num_w} windows (p50: {p50:.2f}, p99: {p99:.2f} ms).",
             flush=True,
         )
 
     avg_ms_per_window = total_time_ms / total_windows if total_windows > 0 else 0.0
-    max_ms_per_window = max(r[3] for r in seq_latency_records) if seq_latency_records else 0.0
 
-    print("\n" + "=" * 60, flush=True)
-    print("  PER-SEQUENCE LATENCY SUMMARY", flush=True)
-    print("=" * 60, flush=True)
-    for s_name, n_win, s_ms, m_ms in seq_latency_records:
-        status = "PASS (<40ms)" if m_ms < 40.0 else "FAIL (>=40ms)"
-        print(f"  {s_name:<45} | {n_win:>6} win | {m_ms:>6.2f} ms/win | {status}", flush=True)
-    print("-" * 60, flush=True)
-    print(f"Overall average: {avg_ms_per_window:.2f} ms/window | Max per-sequence mean: {max_ms_per_window:.2f} ms/window", flush=True)
+    print("\n" + "=" * 115, flush=True)
+    print("  PER-SEQUENCE LATENCY SUMMARY (Percentiles & Throughput)", flush=True)
+    print("=" * 115, flush=True)
+    num_p99_pass = 0
+
+    for s_name, n_win, s_ms, m_ms, p50, p95, p99, mx in seq_latency_records:
+        if p99 < 40.0:
+            status = "PASS (p99 < 40ms)"
+            num_p99_pass += 1
+        else:
+            status = f"EXCEEDS (p99 = {p99:.2f} ms)"
+        print(
+            f"  {s_name:<42} | {n_win:>5} win | mean: {m_ms:>5.2f} ms | p50: {p50:>5.2f} ms | p95: {p95:>5.2f} ms | p99: {p99:>5.2f} ms | max: {mx:>6.2f} ms | {status}",
+            flush=True,
+        )
+    print("-" * 115, flush=True)
+    print(f"Mean compute throughput: {avg_ms_per_window:.2f} ms/window (not a latency guarantee)", flush=True)
+    print(f"Sequences meeting p99 < 40ms: {num_p99_pass}/{len(seq_latency_records)}", flush=True)
     print("Note: First sequence includes model loading and JIT warmup latency overhead.", flush=True)
-
-    if max_ms_per_window < 40.0:
-        print("\n[PASS] Real-time target MET on all sequences (<40.0 ms/window).", flush=True)
-    else:
-        print(f"\n[INFO] Real-time benchmark complete. Max sequence mean latency: {max_ms_per_window:.2f} ms/window.", flush=True)
 
 
 if __name__ == "__main__":
