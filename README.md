@@ -286,7 +286,10 @@ python -m src.latency_bench --dataset-dir ../OrbitSight_Dataset/Training_sets --
 
 ### 5. Video Visualization
 
-Render headless MP4 videos of event accumulation frames overlaid with predictions (in orange) and ground truth (in green):
+Render headless MP4 videos of 2D event accumulation frames overlaid with predictions (in orange, with confidence and track ID) and ground truth (in green). Supports all three sensor resolutions dynamically:
+- **EVK4**: $1280\times 720$
+- **DVXplorer**: $640\times 480$
+- **DAVIS346**: $346\times 260$
 
 ```bash
 python -m src.visualize --npy path/to/events.npy --pred path/to/pred.txt --gt path/to/gt.txt --out video.mp4 --fps 25 --max-windows 300
