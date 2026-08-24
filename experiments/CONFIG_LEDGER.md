@@ -13,8 +13,8 @@ This document tracks all evaluated pipeline configurations across box geometry o
 | **Var A**| Post-Geometry + Multi-Window Track Rerank ($G=3$) | `config.yaml` | `e97ab9c` | **0.161878** | **0.082539** | 0.275221 | **0.530001** | 0.290544 | 0.375333 | 4443 | **3940** | 10849 | 0.289564 | **0.6000** | 0.3337 | 0.4288 | 113.3 | Retired as Scorer (Kept for Track IDs) |
 
 *Notes:*
-- *Cell (d) moved from 0.163628 to 0.165103 (+2 predictions on DAVIS_SL12RB2) following the split-path sub_mask centroid fix in commit 76c3e2a.*
-- *Container ALL-21 Verified: mAP 0.190765, Precision 0.464583, Recall 0.352155, F1 0.400631, TP 7877, FP 9078, FN 14491.*
+- *Parity Attribution Correction: `mc=2000` measures 0.163622 with FP 6918, P 0.422441, F1 0.371104, TP 5060, matching the frozen Cell (d) reference (0.163628) within $6\times 10^{-6}$. The delta between the original baseline and 0.165103 attributes to: `mc 2000 -> 64` = $+0.001481$ (dominant, ACTIVE parameter suppressing noise candidates), and split-path centroid fix in `76c3e2a` = $-0.000006$ (negligible).*
+- *Container ALL-21 Verified: mAP 0.190765, Precision 0.464583, Recall 0.352155, F1 0.400631, TP 7877, FP 9078, FN 14491 (19/21 sequences meet $p_{99} < 40\text{ ms}$; mean compute throughput 13.12 ms/win).*
 - *Test split metrics for Cell (d) are mathematically derived by subtracting Train split counts (TP 5060, FP 6920, FN 10232) from Container All-21 counts (TP 7877, FP 9078, FN 14491) yielding Test TP 2817, FP 2158, FN 4259.*
 
 ---

@@ -16,6 +16,8 @@ predictions/*
 experiments/
 *.csv
 *.xlsx
+*.tar
+*.tar.gz
 
 # IDE & OS files
 .vscode/
