@@ -2,7 +2,7 @@
 
 Measures the rank of ground-truth matched bounding boxes among connected components
 sorted by event count descending across all GT-occupied windows.
-Uses exact detect_boxes implementation and single-source src.metrics.iou.
+Uses exact detect_boxes implementation, windows_overlap timestamp resolution, and single-source src.metrics.iou.
 """
 
 import argparse
@@ -16,7 +16,7 @@ import numpy as np
 from src.common import WINDOW_US, infer_resolution, iter_windows, load_events, sequence_name_from_npy
 from src.detector import detect_boxes
 from src.infer import load_config
-from src.metrics import iou
+from src.metrics import iou, windows_overlap
 from src.static_map import build_continuous_static_map
 
 
@@ -30,20 +30,29 @@ def profile_sequence_component_ranks(
     events = load_events(npy_file)
     width, height = infer_resolution(seq_name, events[:, 0], events[:, 1])
 
-    # Load GT rows indexed by window_start_timestamp_us
-    gt_by_ts: Dict[int, List[Tuple[int, int, int, int]]] = {}
+    # Load GT rows (start_us, end_us, cx, cy, w, h)
+    gt_rows: List[Tuple[int, int, int, int, int, int]] = []
     with open(gt_file, "r", encoding="utf-8") as f:
         rdr = csv.DictReader(f, delimiter="\t")
         for r in rdr:
-            ws = int(r["window_start_timestamp_us"])
-            cx, cy = int(r["center_x"]), int(r["center_y"])
-            bw, bh = int(r["width"]), int(r["height"])
-            if ws not in gt_by_ts:
-                gt_by_ts[ws] = []
-            gt_by_ts[ws].append((cx, cy, bw, bh))
+            gt_rows.append((
+                int(r["window_start_timestamp_us"]),
+                int(r["window_end_timestamp_us"]),
+                int(r["center_x"]),
+                int(r["center_y"]),
+                int(r["width"]),
+                int(r["height"]),
+            ))
 
-    if not gt_by_ts:
+    if not gt_rows:
         return []
+
+    # Map GT by window start timestamp with fallback to windows_overlap
+    gt_by_window: Dict[int, List[int]] = {}
+    for idx, gt in enumerate(gt_rows):
+        gt_by_window.setdefault(gt[0], []).append(idx)
+
+    gt_matched_records = [False] * len(gt_rows)
 
     # Sensor-specific parameters
     sensor_name = "DAVIS"
@@ -55,7 +64,7 @@ def profile_sequence_component_ranks(
     eff = {**cfg, **cfg.get(sensor_name, {})}
     static_thresh = float(eff.get("static_thresh", 0.5))
 
-    # Profile config: set max_components_per_window to unbounded to measure true full rank
+    # Profile config: unbounded components to measure true full rank
     profile_cfg = {**eff, "max_components_per_window": 10000}
 
     # Continuous static mask
@@ -65,10 +74,22 @@ def profile_sequence_component_ranks(
     results: List[Dict[str, Any]] = []
 
     for ws, we, w_events in iter_windows(events, window_us=WINDOW_US):
-        if ws not in gt_by_ts:
+        # Find GT indices for this sliced window
+        cand_gt_indices = gt_by_window.get(ws, [])
+        if not cand_gt_indices:
+            cand_gt_indices = [
+                j for j, gt in enumerate(gt_rows)
+                if not gt_matched_records[j] and windows_overlap(ws, we, gt[0], gt[1])
+            ]
+
+        if not cand_gt_indices:
             continue
+
+        for j in cand_gt_indices:
+            gt_matched_records[j] = True
+
         if len(w_events) == 0:
-            for _ in gt_by_ts[ws]:
+            for j in cand_gt_indices:
                 results.append({
                     "sequence": seq_name,
                     "sensor": sensor_name,
@@ -85,7 +106,7 @@ def profile_sequence_component_ranks(
 
         total_comps = len(candidate_boxes)
         if total_comps == 0:
-            for _ in gt_by_ts[ws]:
+            for j in cand_gt_indices:
                 results.append({
                     "sequence": seq_name,
                     "sensor": sensor_name,
@@ -95,10 +116,12 @@ def profile_sequence_component_ranks(
                 })
             continue
 
-        for g_cx, g_cy, g_bw, g_bh in gt_by_ts[ws]:
+        for j in cand_gt_indices:
+            _, _, g_cx, g_cy, g_bw, g_bh = gt_rows[j]
+            gt_tuple = (float(g_cx), float(g_cy), float(g_bw), float(g_bh))
+
             best_iou = 0.0
             best_rank = -1
-            gt_tuple = (float(g_cx), float(g_cy), float(g_bw), float(g_bh))
 
             for rank_idx, c_box in enumerate(candidate_boxes, start=1):
                 c_tuple = (
@@ -120,6 +143,17 @@ def profile_sequence_component_ranks(
                 "matched": (best_iou >= 0.5),
                 "rank": best_rank,
                 "total_components": total_comps,
+            })
+
+    # Catch any remaining unmatched GT records
+    for j, was_processed in enumerate(gt_matched_records):
+        if not was_processed:
+            results.append({
+                "sequence": seq_name,
+                "sensor": sensor_name,
+                "matched": False,
+                "rank": -1,
+                "total_components": 0,
             })
 
     return results
@@ -165,7 +199,7 @@ def main() -> None:
     gt_files = sorted(list(dataset_dir.rglob("*_bb_windows_40ms.txt")))
     all_records: List[Dict[str, Any]] = []
 
-    print(f"Profiling component ranks across {len(gt_files)} sequences with exact detect_boxes...\n")
+    print(f"Profiling component ranks across {len(gt_files)} sequences with exact detect_boxes and window_overlap...\n")
 
     for gt_f in gt_files:
         seq_name = gt_f.name.replace("_bb_windows_40ms.txt", "")
@@ -193,11 +227,13 @@ def main() -> None:
     for s_name, s_recs in [("EVK4", evk4_recs), ("DVX", dvx_recs), ("DAVIS", davis_recs)]:
         if not s_recs:
             continue
-        s_counts = np.array([r["total_components"] for r in s_recs])
-        p90_thresh = float(np.percentile(s_counts, 90))
-        s_noisy = [r for r in s_recs if r["total_components"] >= p90_thresh]
+        # Sort by total_components descending to take exact top 10%
+        sorted_s = sorted(s_recs, key=lambda r: r["total_components"], reverse=True)
+        top_k = max(1, int(np.ceil(len(sorted_s) * 0.10)))
+        s_noisy = sorted_s[:top_k]
+        min_comp_in_decile = s_noisy[-1]["total_components"]
         noisy_all.extend(s_noisy)
-        print(f"[{s_name}] p90 Threshold = {p90_thresh:.1f} components:")
+        print(f"[{s_name}] Top 10% (n={top_k}/{len(s_recs)} windows, min components in decile = {min_comp_in_decile}):")
         summarize_ranks(s_noisy, f"{s_name} (Noisy)")
 
     print("-" * 65)
