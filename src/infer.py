@@ -289,30 +289,34 @@ def main() -> None:
 
         seq_latency_records.append((seq_name, num_w, seq_ms, ms_per_window, p50, p95, p99, mx))
         print(
-            f"Done '{seq_name}': {seq_ms:.2f} ms total, {ms_per_window:.2f} ms/window across {num_w} windows (p50: {p50:.2f}, p99: {p99:.2f} ms).",
+            f"Done '{seq_name}': {seq_ms:.2f} ms total, {ms_per_window:.2f} ms/window across {num_w} windows (pass1 p50: {p50:.2f}, p99: {p99:.2f} ms).",
             flush=True,
         )
 
     avg_ms_per_window = total_time_ms / total_windows if total_windows > 0 else 0.0
 
-    print("\n" + "=" * 115, flush=True)
-    print("  PER-SEQUENCE LATENCY SUMMARY (Percentiles & Throughput)", flush=True)
-    print("=" * 115, flush=True)
+    print("\n" + "=" * 135, flush=True)
+    print("  PER-SEQUENCE LATENCY SUMMARY (Pass 1 Percentiles & Amortized Total)", flush=True)
+    print("=" * 135, flush=True)
     num_p99_pass = 0
 
     for s_name, n_win, s_ms, m_ms, p50, p95, p99, mx in seq_latency_records:
         if p99 < 40.0:
-            status = "PASS (p99 < 40ms)"
+            status = "PASS (Pass-1 p99 < 40ms)"
             num_p99_pass += 1
         else:
-            status = f"EXCEEDS (p99 = {p99:.2f} ms)"
+            status = f"EXCEEDS (Pass-1 p99 = {p99:.2f} ms)"
         print(
-            f"  {s_name:<42} | {n_win:>5} win | mean: {m_ms:>5.2f} ms | p50: {p50:>5.2f} ms | p95: {p95:>5.2f} ms | p99: {p99:>5.2f} ms | max: {mx:>6.2f} ms | {status}",
+            f"  {s_name:<42} | {n_win:>5} win | amortized_total: {m_ms:>5.2f} ms | pass1 p50: {p50:>5.2f} ms | p95: {p95:>5.2f} ms | p99: {p99:>5.2f} ms | max: {mx:>6.2f} ms | {status}",
             flush=True,
         )
-    print("-" * 115, flush=True)
+    print("-" * 135, flush=True)
     print(f"Mean compute throughput: {avg_ms_per_window:.2f} ms/window (not a latency guarantee)", flush=True)
-    print(f"Sequences meeting p99 < 40ms: {num_p99_pass}/{len(seq_latency_records)}", flush=True)
+    print(
+        f"Sequences meeting Pass-1 p99 < 40ms: {num_p99_pass}/{len(seq_latency_records)}  "
+        "(Pass 1 only — NOT end-to-end latency; see src/latency_bench.py for full-pipeline p99)",
+        flush=True,
+    )
     print("Note: First sequence includes model loading and JIT warmup latency overhead.", flush=True)
 
 
