@@ -68,8 +68,8 @@ Space Domain Awareness (SDA) is critical for spaceflight safety, collision avoid
 - **mAP increased to `0.165103` (+6.2% relative gain over baseline)**, **F1 surged to `0.371077` (+21.2% gain)**, and **false alarms plunged from 13,146 down to 6,920** (47.4% false alarm reduction).
 
 ### Phase 5: Streaming Pipeline Optimization & Real-Time Profiling
-- Replaced iterative component loops with vectorized `np.bincount` event summation and bounded candidate sorting (`max_components_per_window: 64`).
-- Validated via `src/component_rank.py` that maximum true target component rank across all 15,292 windows is **32** ($p_{99} = 6.0$, with matched = 5,647 $\ge$ 5,060 pipeline TPs), confirming zero candidate truncation on the 17 training sequences.
+- Replaced iterative component loops with vectorized `np.bincount` event summation and active candidate budget sorting (`max_components_per_window: 64`). The 64-component budget is an active tuned parameter providing a $+0.001481$ mAP gain ($0.163622 \rightarrow 0.165103$) by suppressing low-density noise artifacts from displacing high-confidence true detections.
+- Evaluated empirical component ranks via `src/component_rank.py` across all 15,292 ground-truth windows (5,647 matched $\ge$ 5,060 pipeline TPs; overall $p_{50}=1.0, p_{95}=3.0, p_{99}=6.0, \max=32$). Candidate generation degrades under dense clutter on DAVIS only ($35.7\% \rightarrow 11.9\%$ any-match; $121/1019$ windows, correcting the pre-`ac10e04` preliminary artifact of $2/1672$), while EVK4 is unaffected ($84.6\% \rightarrow 84.3\%$) and DVX shows no degradation ($25.4\% \rightarrow 33.8\%$). Budget truncation is not implicated: zero windows exceed rank 64 on any sensor ($\max=32$).
 - Profiled full per-window streaming latency across 3 independent runs without synthetic amortization constants.
 
 ---
