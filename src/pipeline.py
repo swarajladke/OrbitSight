@@ -209,6 +209,22 @@ def run_sequence(
         objectness_model = joblib.load(obj_path)
         print(f"window objectness model loaded: {obj_path}", flush=True)
 
+    # Load post-hoc box resizing model if configured
+    box_reg_mode = str(eff.get("box_regressor_mode", "none")).lower()
+    box_reg_model = None
+    if box_reg_mode in ("arm1", "least_squares"):
+        from pathlib import Path
+        import joblib
+        p = Path(eff.get("box_regressor_arm1_path", "models/box_regressor_arm1.joblib"))
+        if p.exists():
+            box_reg_model = joblib.load(p)
+    elif box_reg_mode in ("arm2", "learned"):
+        from pathlib import Path
+        import joblib
+        p = Path(eff.get("box_regressor_arm2_path", "models/box_regressor_arm2.joblib"))
+        if p.exists():
+            box_reg_model = joblib.load(p)
+
     # Pass 2: Persistence matching and candidate scoring
     window_candidates: List[List[Dict[str, Any]]] = []
 
@@ -265,8 +281,11 @@ def run_sequence(
                 ]
                 X_cand = np.array(cand_features_list, dtype=np.float32)
                 probs = learned_model.predict_proba(X_cand)[:, 1]
-                for b_copy, p_score in zip(cand_boxes_list, probs):
+                for b_copy, p_score, f_dict in zip(cand_boxes_list, probs, batch_feats):
                     b_copy["confidence"] = float(p_score)
+                    b_copy["features"] = [f_dict[name] for name in FEATURE_NAMES] + [float(width), float(height)]
+                    b_copy["extent_w"] = f_dict.get("extent_w", b_copy.get("extent_w", b_copy["width"]))
+                    b_copy["extent_h"] = f_dict.get("extent_h", b_copy.get("extent_h", b_copy["height"]))
             else:
                 for b_copy in cand_boxes_list:
                     b_copy["confidence"] = compute_confidence(b_copy, int(b_copy["hits"]), eff)
@@ -337,13 +356,37 @@ def run_sequence(
             cands.sort(key=lambda b: b["confidence"], reverse=True)
             cands = cands[:max_k]
 
-        # Rounding into final prediction format
+        # Rounding into final prediction format (with post-hoc box resizing if active)
+        min_dim = float(eff.get("min_dim", 1.0))
+        max_dim = float(eff.get("max_dim", 200.0))
+
         for b in cands:
             cx = int(round(b["center_x"]))
             cy = int(round(b["center_y"]))
-            bw = int(round(b["width"]))
-            bh = int(round(b["height"]))
+            bw = float(b["width"])
+            bh = float(b["height"])
+
+            if box_reg_mode in ("arm1", "least_squares") and box_reg_model is not None:
+                s_dict = box_reg_model.get(sensor_name, {"w": (1.0, 0.0), "h": (1.0, 0.0)})
+                ext_w = float(b.get("extent_w", bw))
+                ext_h = float(b.get("extent_h", bh))
+                bw = s_dict["w"][0] * ext_w + s_dict["w"][1]
+                bh = s_dict["h"][0] * ext_h + s_dict["h"][1]
+            elif box_reg_mode in ("arm2", "learned") and box_reg_model is not None:
+                reg_w = box_reg_model["reg_w"]
+                reg_h = box_reg_model["reg_h"]
+                f_vec = b.get("features", None)
+                if f_vec is not None:
+                    X_cand = np.array([f_vec], dtype=np.float32)
+                    bw = float(np.exp(reg_w.predict(X_cand)[0]))
+                    bh = float(np.exp(reg_h.predict(X_cand)[0]))
+
+            bw = max(min_dim, min(max_dim, bw))
+            bh = max(min_dim, min(max_dim, bh))
+
+            bw_int = int(round(bw))
+            bh_int = int(round(bh))
             conf_rounded = round(float(b["confidence"]), 4)
-            predictions.append((w_start, w_end, cx, cy, bw, bh, conf_rounded))
+            predictions.append((w_start, w_end, cx, cy, bw_int, bh_int, conf_rounded))
 
     return predictions, num_windows
