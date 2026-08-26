@@ -22,3 +22,31 @@ This document tracks all evaluated pipeline configurations across box geometry o
 
 ## 2. Tracking Architecture Notes
 - **Tracking Mode**: `tracking_mode: "ids_only"` is configured by default to emit stable multi-window association IDs without modifying base confidence scores, ensuring byte-identical numerical outputs to the baseline while satisfying SSA challenge tracking requirements.
+
+---
+
+## 3. Post-Hoc Emitted-Box Sizing Evaluation (P1 / P2 / P3)
+
+To overcome the IoU >= 0.5 matching penalty caused by fixed/heuristic bounding boxes without disrupting the upstream detection operating point (candidate generation, learned scoring, NMS, and window objectness gating), a post-hoc box regressor operates exclusively on surviving candidates at Pass 4. Centroids, confidences, and rank order remain bit-identical.
+
+### 3.1 Four-Arm Comparison Matrix (Train-17 Sequences, 11,980 Emitted Predictions)
+
+| Arm | Description | Train-17 mAP | Precision | Recall | F1 Score | TP | FP | FN | Upgrades | Downgrades | Status |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| **Arm 0** | Shipped Baseline Control (Fixed/Extent geometry) | 0.165103 | 0.422371 | 0.330892 | 0.371077 | 5060 | 6920 | 10232 | — | — | Control Baseline |
+| **Arm 1** | Post-Hoc Least Squares Linear Regressor | 0.113964 | 0.463606 | 0.363196 | 0.407304 | 5554 | 6426 | 9738 | 1581 | 1087 | Rejected |
+| **Arm 2** | Post-Hoc HistGradientBoostingRegressor (Dual Log Heads) | **0.258616** | **0.580217** | **0.454551** | **0.509754** | **6951** | **5029** | **8341** | **2302** | **411** | **PROMOTED (+56.6% mAP Gain)** |
+| **Oracle**| Emitted-Box Oracle Ceiling (Matched Ground Truth Box Sizes) | 0.318067 | 0.703339 | 0.551007 | 0.617923 | 8426 | 3554 | 6866 | 3398 | 32 | Theoretical Ceiling |
+
+*Per-Sensor mAP Progression (Arm 0 -> Arm 2):*
+- **EVK4**: 0.612170 -> **0.770544** (+0.158374)
+- **DVX**: 0.121921 -> **0.225114** (+0.103193)
+- **DAVIS**: 0.152401 -> **0.228126** (+0.075725)
+
+### 3.2 Gate Verifications & Interleaved Benchmark
+- **GATE 1a-bis (Bit Parity)**: Vectorized sequence-batched feature collection and dual `.predict()` inference verified bit-identical on all 11,980 predictions (max diff: 0.000000).
+- **Interleaved A/B/A/B/A Latency Benchmark (106,192 windows across 17 sequences)**:
+  - Arm 0: `16.0430 +/- 1.7690 ms/window`
+  - Arm 2: `17.8108 +/- 5.1089 ms/window`
+  - Paired Incremental Delta: `+2.2783 +/- 5.1510 ms/window` (within 2 stdev of zero; gate passed).
+
