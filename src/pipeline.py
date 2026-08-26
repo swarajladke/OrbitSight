@@ -224,6 +224,11 @@ def run_sequence(
         p = Path(eff.get("box_regressor_arm2_path", "models/box_regressor_arm2.joblib"))
         if p.exists():
             box_reg_model = joblib.load(p)
+        elif Path("models/box_regressor_w.joblib").exists() and Path("models/box_regressor_h.joblib").exists():
+            box_reg_model = {
+                "reg_w": joblib.load("models/box_regressor_w.joblib"),
+                "reg_h": joblib.load("models/box_regressor_h.joblib"),
+            }
 
     # Pass 2: Persistence matching and candidate scoring
     window_candidates: List[List[Dict[str, Any]]] = []
@@ -281,9 +286,9 @@ def run_sequence(
                 ]
                 X_cand = np.array(cand_features_list, dtype=np.float32)
                 probs = learned_model.predict_proba(X_cand)[:, 1]
-                for b_copy, p_score, f_dict in zip(cand_boxes_list, probs, batch_feats):
+                for b_copy, p_score, f_list, f_dict in zip(cand_boxes_list, probs, cand_features_list, batch_feats):
                     b_copy["confidence"] = float(p_score)
-                    b_copy["features"] = [f_dict[name] for name in FEATURE_NAMES] + [float(width), float(height)]
+                    b_copy["_f_list"] = f_list
                     b_copy["extent_w"] = f_dict.get("extent_w", b_copy.get("extent_w", b_copy["width"]))
                     b_copy["extent_h"] = f_dict.get("extent_h", b_copy.get("extent_h", b_copy["height"]))
             else:
@@ -327,8 +332,8 @@ def run_sequence(
                 for c in window_candidates[w_idx]:
                     c["confidence"] = float(c["confidence"]) * p_obj
 
-    # Pass 4: NMS, confidence filtering, top-K, and prediction assembly
-    predictions: List[Tuple[int, int, int, int, int, int, float]] = []
+    # Pass 4: NMS, confidence filtering, top-K, and sequence-batched prediction assembly
+    survived_items: List[Tuple[int, int, Dict[str, Any]]] = []
 
     for w_idx in range(num_windows):
         w_start, w_end, _ = window_records[w_idx]
@@ -356,37 +361,50 @@ def run_sequence(
             cands.sort(key=lambda b: b["confidence"], reverse=True)
             cands = cands[:max_k]
 
-        # Rounding into final prediction format (with post-hoc box resizing if active)
-        min_dim = float(eff.get("min_dim", 1.0))
-        max_dim = float(eff.get("max_dim", 200.0))
-
         for b in cands:
-            cx = int(round(b["center_x"]))
-            cy = int(round(b["center_y"]))
-            bw = float(b["width"])
-            bh = float(b["height"])
+            survived_items.append((w_start, w_end, b))
 
-            if box_reg_mode in ("arm1", "least_squares") and box_reg_model is not None:
-                s_dict = box_reg_model.get(sensor_name, {"w": (1.0, 0.0), "h": (1.0, 0.0)})
-                ext_w = float(b.get("extent_w", bw))
-                ext_h = float(b.get("extent_h", bh))
-                bw = s_dict["w"][0] * ext_w + s_dict["w"][1]
-                bh = s_dict["h"][0] * ext_h + s_dict["h"][1]
-            elif box_reg_mode in ("arm2", "learned") and box_reg_model is not None:
-                reg_w = box_reg_model["reg_w"]
-                reg_h = box_reg_model["reg_h"]
-                f_vec = b.get("features", None)
-                if f_vec is not None:
-                    X_cand = np.array([f_vec], dtype=np.float32)
-                    bw = float(np.exp(reg_w.predict(X_cand)[0]))
-                    bh = float(np.exp(reg_h.predict(X_cand)[0]))
+    if not survived_items:
+        return [], num_windows
 
-            bw = max(min_dim, min(max_dim, bw))
-            bh = max(min_dim, min(max_dim, bh))
+    min_dim = float(eff.get("min_dim", 1.0))
+    max_dim = float(eff.get("max_dim", 200.0))
 
-            bw_int = int(round(bw))
-            bh_int = int(round(bh))
-            conf_rounded = round(float(b["confidence"]), 4)
-            predictions.append((w_start, w_end, cx, cy, bw_int, bh_int, conf_rounded))
+    # Apply batch box resizing if enabled
+    if box_reg_mode in ("arm1", "least_squares") and box_reg_model is not None:
+        s_dict = box_reg_model.get(sensor_name, {"w": (1.0, 0.0), "h": (1.0, 0.0)})
+        for _, _, b in survived_items:
+            ext_w = float(b.get("extent_w", b["width"]))
+            ext_h = float(b.get("extent_h", b["height"]))
+            b["width"] = s_dict["w"][0] * ext_w + s_dict["w"][1]
+            b["height"] = s_dict["h"][0] * ext_h + s_dict["h"][1]
+    elif box_reg_mode in ("arm2", "learned") and box_reg_model is not None:
+        reg_w = box_reg_model.get("reg_w", box_reg_model.get("w", None))
+        reg_h = box_reg_model.get("reg_h", box_reg_model.get("h", None))
+        feat_matrix = [b["_f_list"] + [float(width), float(height)] for _, _, b in survived_items if "_f_list" in b]
+        if len(feat_matrix) == len(survived_items):
+            X_all = np.array(feat_matrix, dtype=np.float32)
+            log_w_preds = reg_w.predict(X_all)
+            log_h_preds = reg_h.predict(X_all)
+            w_preds = np.exp(log_w_preds)
+            h_preds = np.exp(log_h_preds)
+            for (_, _, b), pred_w, pred_h in zip(survived_items, w_preds, h_preds):
+                b["width"] = float(pred_w)
+                b["height"] = float(pred_h)
+
+    predictions: List[Tuple[int, int, int, int, int, int, float]] = []
+    for w_start, w_end, b in survived_items:
+        cx = int(round(b["center_x"]))
+        cy = int(round(b["center_y"]))
+        bw = float(b["width"])
+        bh = float(b["height"])
+
+        bw = max(min_dim, min(max_dim, bw))
+        bh = max(min_dim, min(max_dim, bh))
+
+        bw_int = int(round(bw))
+        bh_int = int(round(bh))
+        conf_rounded = round(float(b["confidence"]), 4)
+        predictions.append((w_start, w_end, cx, cy, bw_int, bh_int, conf_rounded))
 
     return predictions, num_windows
