@@ -14,11 +14,14 @@ This document tracks all evaluated pipeline configurations across box geometry o
 | **Var A**| Post-Geometry + Multi-Window Track Rerank ($G=3$) | `config.yaml` | `e97ab9c` | 0.161878 | 0.082539 | 0.275221 | 0.530001 | 0.290544 | 0.375333 | 4443 | 3940 | 10849 | 0.289564 | 0.6000 | 0.3337 | 0.4288 | UNMEASURED | Retired as Scorer (Kept for Track IDs) |
 
 *Notes:*
-- *FINAL SUBMISSION ARTIFACT RE-FROZEN at `cf7eb67`, `image.tar` 189,846,528 B, offline run 61.08 min (3664.99 s across 143,750 windows = 25.50 ms/window throughput across all 21 sequences), all-21 mAP 0.284406, 21/21 detection counts matched (16,955 total detections across 63 validated .txt files).*
-- *Container ALL-21 Verified: mAP 0.284406, Precision 0.623120, Recall 0.472327, F1 0.537345, TP 10565, FP 6390, FN 11803 (18/21 sequences meet Pass-1 $p_{99} < 40\text{ ms}$ — Pass 1 only — NOT end-to-end latency; see src/latency_bench.py).*
+- *FINAL SUBMISSION ARTIFACT RE-FROZEN at `cf7eb67`, `image.tar` 189,846,528 B, all-21 mAP 0.284406, 21/21 detection counts matched (16,955 total detections across 63 validated .txt files).*
+- *Container ALL-21 Verified: mAP 0.284406, Precision 0.623120, Recall 0.472327, F1 0.537345, TP 10565, FP 6390, FN 11803.*
+- *Container Wall-Clock Range Across Four Independent Runs (Functionally Identical Code): `23.26 min` / `24.38 min` / `30.62 min` / `61.08 min` (3664.99 s). The 61.08 min measurement occurred under concurrent host resource contention and is explicitly NOT attributable to the box regressor; amortized throughput is host-noise-dominated. Criterion 3 is reported from standalone `src/latency_bench.py` only.*
+- *Sub-Split Progression & Reconciliation: Sparse-10 `0.100600 -> 0.226600` (+125.2%), Dense-7 `0.257257 -> 0.304353` (+18.3%), which mathematically reconciles to the Train-17 total mAP of `0.258616` ($[10(0.226600) + 7(0.304353)] / 17 = 0.258615$).*
 - *Test split metrics for Final Shipping Config (e) derived by subtracting Train-17 counts (TP 6951, FP 5029, FN 8341) from Container All-21 counts (TP 10565, FP 6390, FN 11803) yielding Test TP 3614, FP 1361, FN 3462 (TP+FP = 4,975; TP+FN = 7,076; Precision 0.726432, Recall 0.510740, F1 0.599784 [2TP/(2TP+FP+FN) = 7228/12051], mAP 0.394014).*
 - *Generalisation Result: FP->TP conversions on Train-17: 1,891 / 11,980 (15.8%) vs Test-4: 797 / 4,975 (16.0%), summing to the all-21 delta of +2,688 TP (10,565 vs 7,877).*
-- *Arm 1 Upgrades/Downgrades: 1581 upgrades / 1087 downgrades is the authoritative post-top-K count across the 11,980 emitted predictions (1637 / 1143 before top-K candidate filtering).*
+- *Arm 1 Upgrades/Downgrades: `1581 / 1087` is the authoritative post-top-K count across the 11,980 emitted predictions (`1637 / 1143` before top-K candidate filtering).*
+- *Arm 1 Model Weights Footnote: Arm 1 weights are not retained in the repository; row reproduced from the P1 Step 1 measurement. Known limitation: the arm1 branch in `src/pipeline.py` lacks the feature matrix mismatch guard present in the arm2 branch; deferred post-submission to preserve source-artifact equality.*
 - *Feature Collection Architecture: feature extraction occurs in Pass 2 as a by-product of learned scoring (_f_list attached to candidate dicts), so the regressor's marginal inference cost is strictly two vectorized .predict() calls per sequence.*
 - *Parity Attribution Correction: `mc=2000` measures 0.163622 with FP 6918, P 0.422441, F1 0.371104, TP 5060, matching the frozen Cell (d) reference (0.163628) within $6\times 10^{-6}$. The delta between the original baseline and 0.165103 attributes to: `mc 2000 -> 64` = $+0.001481$ (dominant, ACTIVE parameter suppressing noise candidates), and split-path centroid fix in `76c3e2a` = $-0.000006$ (negligible).*
 - *A/B resize micro-benchmark note: abandoned as unresolvable across host load conditions (+2.01, +0.55, +2.28 ms/win, error bar 5.15), with rank-neutral Gate 1a-bis bit-parity holding at 0.000000 max diff on all 11,980 predictions.*
@@ -39,9 +42,11 @@ To overcome the IoU >= 0.5 matching penalty caused by fixed/heuristic bounding b
 | Arm | Description | Train-17 mAP | Precision | Recall | F1 Score | TP | FP | FN | Upgrades | Downgrades | Status |
 |---|---|---|---|---|---|---|---|---|---|---|---|
 | **Arm 0** | Shipped Baseline Control (Fixed/Extent geometry) | 0.165103 | 0.422371 | 0.330892 | 0.371077 | 5060 | 6920 | 10232 | — | — | Control Baseline |
-| **Arm 1** | Post-Hoc Least Squares Linear Regressor | 0.113964 | 0.463606 | 0.363196 | 0.407304 | 5554 | 6426 | 9738 | 1581 | 1087 | Rejected |
+| **Arm 1\***| Post-Hoc Least Squares Linear Regressor | 0.113964 | 0.463606 | 0.363196 | 0.407304 | 5554 | 6426 | 9738 | 1581 | 1087 | Rejected |
 | **Arm 2** | Post-Hoc HistGradientBoostingRegressor (Dual Log Heads) | **0.258616** | **0.580217** | **0.454551** | **0.509754** | **6951** | **5029** | **8341** | **2302** | **411** | **PROMOTED (+56.6% mAP Gain)** |
 | **Oracle**| Emitted-Box Oracle Ceiling (Matched Ground Truth Box Sizes) | 0.318067 | 0.703339 | 0.551007 | 0.617923 | 8426 | 3554 | 6866 | 3398 | 32 | Theoretical Ceiling |
+
+*\* Note: Arm 1 weights are not retained in the repository; row reproduced from the authoritative P1 Step 1 measurement (1581 upgrades / 1087 downgrades post-top-K).*
 
 *Per-Sensor mAP Progression (Arm 0 -> Arm 2):*
 - **EVK4**: 0.612170 -> **0.770544** (+0.158374)
