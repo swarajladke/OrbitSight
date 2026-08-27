@@ -19,9 +19,9 @@ scorer_mode: "learned"
 scorer_path: "models/scorer_pregeom.joblib"
 objectness_mode: "gate"
 objectness_path: "models/scorer_objectness_pre_geometry.joblib"
-tracking_mode: "ids_only"
 box_regressor_mode: "arm2"
 box_regressor_arm2_path: "models/box_regressor_arm2.joblib"
+tracking_mode: "ids_only"
 
 # Per-sensor pre-geometry optimal configurations
 EVK4:
