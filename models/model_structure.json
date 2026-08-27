@@ -88,6 +88,7 @@
         "min_samples_leaf": 20,
         "random_state": 42
       },
+      "application": "post-hoc, applied after conf_min and top-K; rank-neutral (centroids and confidences unchanged)",
       "feature_count": 15,
       "feature_names": [
         "events",
@@ -106,9 +107,34 @@
         "frame_w",
         "frame_h"
       ],
-      "train_sample_count": 6977,
-      "val_mae_w": 0.284210,
-      "val_mae_h": 0.297424
+      "train_sample_count": 8104,
+      "val_sample_count": 1084,
+      "metrics": {
+        "val_mae_log_w": 0.284210,
+        "val_mae_log_h": 0.297424,
+        "units": "natural_log_pixels",
+        "per_sensor_pixel_mae": {
+          "DVX": {
+            "val_mae_pixel_w": 3.65,
+            "val_mae_pixel_h": 3.17
+          },
+          "DAVIS": {
+            "val_mae_pixel_w": 2.41,
+            "val_mae_pixel_h": 2.67
+          },
+          "EVK4": {
+            "val_mae_pixel_w": null,
+            "val_mae_pixel_h": null,
+            "note": "no validation sequences in VAL_SEQS"
+          }
+        }
+      },
+      "arms_evaluated": {
+        "arm_0_baseline": 0.165103,
+        "arm_1_least_squares": 0.113964,
+        "arm_2_shipped": 0.258616,
+        "oracle_ceiling": 0.318067
+      }
     }
   },
   "train_sequences": [
