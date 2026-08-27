@@ -77,6 +77,38 @@
         "val_roc_auc": 0.888987,
         "val_pr_auc": 0.921458
       }
+    },
+    "box_regressor": {
+      "filename": "models/box_regressor_arm2.joblib",
+      "model_type": "HistGradientBoostingRegressor (Dual: Width & Height)",
+      "hyperparameters": {
+        "max_iter": 150,
+        "max_depth": 6,
+        "learning_rate": 0.08,
+        "min_samples_leaf": 20,
+        "random_state": 42
+      },
+      "feature_count": 15,
+      "feature_names": [
+        "events",
+        "density",
+        "area",
+        "extent_w",
+        "extent_h",
+        "aspect",
+        "hits",
+        "disp_prev",
+        "disp_next",
+        "speed",
+        "dir_consistency",
+        "static_frac",
+        "local_bg",
+        "frame_w",
+        "frame_h"
+      ],
+      "train_sample_count": 6977,
+      "val_mae_w": 0.284210,
+      "val_mae_h": 0.297424
     }
   },
   "train_sequences": [

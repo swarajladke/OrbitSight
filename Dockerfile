@@ -8,6 +8,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY src/ ./src/
 COPY models/scorer_pregeom.joblib ./models/
 COPY models/scorer_objectness_pre_geometry.joblib ./models/
+COPY models/box_regressor_arm2.joblib ./models/
 COPY models/model_structure.json ./models/
 COPY config.yaml .
 COPY run.sh .
