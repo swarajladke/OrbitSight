@@ -382,15 +382,18 @@ def run_sequence(
         reg_w = box_reg_model.get("reg_w", box_reg_model.get("w", None))
         reg_h = box_reg_model.get("reg_h", box_reg_model.get("h", None))
         feat_matrix = [b["_f_list"] + [float(width), float(height)] for _, _, b in survived_items if "_f_list" in b]
-        if len(feat_matrix) == len(survived_items):
-            X_all = np.array(feat_matrix, dtype=np.float32)
-            log_w_preds = reg_w.predict(X_all)
-            log_h_preds = reg_h.predict(X_all)
-            w_preds = np.exp(log_w_preds)
-            h_preds = np.exp(log_h_preds)
-            for (_, _, b), pred_w, pred_h in zip(survived_items, w_preds, h_preds):
-                b["width"] = float(pred_w)
-                b["height"] = float(pred_h)
+        if len(feat_matrix) != len(survived_items):
+            raise RuntimeError(
+                f"Feature matrix count mismatch: {len(feat_matrix)} features extracted for {len(survived_items)} surviving candidates"
+            )
+        X_all = np.array(feat_matrix, dtype=np.float32)
+        log_w_preds = reg_w.predict(X_all)
+        log_h_preds = reg_h.predict(X_all)
+        w_preds = np.exp(log_w_preds)
+        h_preds = np.exp(log_h_preds)
+        for (_, _, b), pred_w, pred_h in zip(survived_items, w_preds, h_preds):
+            b["width"] = float(pred_w)
+            b["height"] = float(pred_h)
 
     predictions: List[Tuple[int, int, int, int, int, int, float]] = []
     for w_start, w_end, b in survived_items:
