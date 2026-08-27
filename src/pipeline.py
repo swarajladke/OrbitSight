@@ -1,14 +1,23 @@
 """Unified end-to-end inference and evaluation pipeline for OrbitSight.
 
-Execution Order per Window:
-1. Windowing (`iter_windows`) & Fast Count Map Generation (`event_image` with need_polarity=False)
-2. Component Detection (`detect_boxes` returning full untruncated component lists)
-3. Vectorized Neighborhood Persistence Matching against full untruncated neighbor windows (`min_hits`)
-4. Deterministic Multi-term Weighted Confidence Scoring (`compute_confidence`)
-5. Pipeline-stage NMS on weighted confidence (`apply_nms` if `nms_stage == 'pipeline'`)
-6. Confidence Threshold Gating (`conf_min`)
-7. Top-K Window Candidate Truncation (`max_candidates_per_window`)
-8. Coordinate & Confidence Rounding
+Execution Pipeline Order:
+1. Pass 1 (Detection & Component Extraction):
+   - Fast Count Map Generation (`event_image` with need_polarity=False)
+   - Component Detection (`detect_boxes` returning untruncated candidate boxes)
+   - Static Source Map Suppression (optional star/hot pixel filtering)
+2. Pass 2 (Neighborhood Association & Learned Candidate Scoring):
+   - Vectorized temporal persistence matching across adjacent windows (`min_hits`)
+   - 13-dimensional candidate feature extraction (`extract_window_features_batch`)
+   - Learned tree/logistic candidate scoring (`predict_proba` attaching `_f_list`)
+3. Pass 3 (Window Objectness Gating):
+   - 21-dimensional temporal window context aggregation (prev, cur, next window stats)
+   - Learned window objectness classification (`predict_proba` score multiplier)
+4. Pass 4 (Post-Hoc Filtering, Batched Box Regression & Emission):
+   - Confidence threshold filtering (`conf_min`)
+   - Non-Maximum Suppression (`apply_nms`)
+   - Top-K Candidate Selection (`max_candidates_per_window`)
+   - Post-Hoc Bounding Box Regression (vectorized dual HGBR heads `reg_w`, `reg_h` with strict feature count guard)
+   - Coordinate bounding box clamping to `[min_dim, max_dim]` and coordinate/confidence rounding
 """
 
 import math
