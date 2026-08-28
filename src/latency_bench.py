@@ -267,6 +267,35 @@ def main() -> None:
     dataset_dir = Path(args.dataset_dir).resolve()
     cfg = load_config(Path(args.config))
 
+    import gc
+    import ctypes
+    from ctypes import wintypes
+
+    class PROCESS_MEMORY_COUNTERS(ctypes.Structure):
+        _fields_ = [
+            ('cb', wintypes.DWORD),
+            ('PageFaultCount', wintypes.DWORD),
+            ('PeakWorkingSetSize', ctypes.c_size_t),
+            ('WorkingSetSize', ctypes.c_size_t),
+            ('QuotaPeakPagedPoolUsage', ctypes.c_size_t),
+            ('QuotaPagedPoolUsage', ctypes.c_size_t),
+            ('QuotaPeakNonPagedPoolUsage', ctypes.c_size_t),
+            ('QuotaNonPagedPoolUsage', ctypes.c_size_t),
+            ('PagefileUsage', ctypes.c_size_t),
+            ('PeakPagefileUsage', ctypes.c_size_t),
+        ]
+
+    k32 = ctypes.WinDLL('kernel32', use_last_error=True)
+    k32.K32GetProcessMemoryInfo.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESS_MEMORY_COUNTERS), wintypes.DWORD]
+    k32.K32GetProcessMemoryInfo.restype = wintypes.BOOL
+
+    def get_current_rss_mb() -> float:
+        pmc = PROCESS_MEMORY_COUNTERS()
+        pmc.cb = ctypes.sizeof(PROCESS_MEMORY_COUNTERS)
+        handle = k32.GetCurrentProcess()
+        k32.K32GetProcessMemoryInfo(handle, ctypes.byref(pmc), pmc.cb)
+        return float(pmc.WorkingSetSize) / (1024.0 * 1024.0)
+
     npy_files = sorted(list(dataset_dir.rglob("*.npy")))
     if args.limit:
         npy_files = npy_files[:args.limit]
@@ -277,6 +306,7 @@ def main() -> None:
     all_stalls = []
 
     for idx, npy_p in enumerate(npy_files, start=1):
+        rss_start = get_current_rss_mb()
         seq_name = sequence_name_from_npy(npy_p)
         width, height = infer_resolution(seq_name)
         events = load_events(npy_p)
@@ -301,6 +331,7 @@ def main() -> None:
         seq_bench_results.append({
             "sequence": seq_name,
             "windows": win_count,
+            "rss_mb": rss_start,
             "compute_mean": (float(np.mean(rep_means)), float(np.std(rep_means))),
             "compute_p50": (float(np.mean(rep_p50s)), float(np.std(rep_p50s))),
             "compute_p95": (float(np.mean(rep_p95s)), float(np.std(rep_p95s))),
@@ -311,7 +342,10 @@ def main() -> None:
         p99_val, p99_std = seq_bench_results[-1]["compute_p99"]
         total_p99 = p99_val + 40.0
         status = "PASS (<40ms)" if p99_val < 40.0 else "FAIL (>=40ms)"
-        print(f"[{idx}/{len(npy_files)}] {seq_name:<45} | win: {win_count:>5} | comp p99: {p99_val:>5.2f} +/- {p99_std:>4.2f} ms | total p99: {total_p99:>5.2f} ms | {status}", flush=True)
+        print(f"[{idx}/{len(npy_files)}] {seq_name:<45} | RSS: {rss_start:>6.1f} MB | win: {win_count:>5} | comp p99: {p99_val:>5.2f} +/- {p99_std:>4.2f} ms | total p99: {total_p99:>5.2f} ms | {status}", flush=True)
+
+        del events
+        gc.collect()
 
     print("\n" + "=" * 130, flush=True)
     print(f"  REAL STREAMING FULL-PIPELINE LATENCY BENCHMARK TABLE ({args.reps} Independent Runs, Warmup={args.warmup_windows} Win Excluded)")
