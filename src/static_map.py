@@ -15,7 +15,7 @@ def build_continuous_static_map(
 ) -> np.ndarray:
     """Return a continuous float32 map (height, width) of the fraction of windows each pixel is active.
 
-    Vectorized O(E) implementation with exact linear window semantics.
+    Fixed-size accumulator implementation over streaming windows.
     """
     if events.shape[0] == 0:
         return np.zeros((height, width), dtype=np.float32)
@@ -27,25 +27,22 @@ def build_continuous_static_map(
     if num_windows <= 0:
         return np.zeros((height, width), dtype=np.float32)
 
-    x = events[:, 0].astype(np.int64)
-    y = events[:, 1].astype(np.int64)
-    w_idx = (t.astype(np.int64) - t_start) // window_us
+    from src.common import iter_windows
 
-    valid = (x >= 0) & (x < width) & (y >= 0) & (y < height) & (w_idx >= 0) & (w_idx < num_windows)
-    x = x[valid]
-    y = y[valid]
-    w_idx = w_idx[valid]
+    counts = np.zeros(height * width, dtype=np.int32)
+    for _, _, w_ev in iter_windows(events, window_us=window_us):
+        if len(w_ev) == 0:
+            continue
+        x = w_ev[:, 0].astype(np.int64)
+        y = w_ev[:, 1].astype(np.int64)
+        valid = (x >= 0) & (x < width) & (y >= 0) & (y < height)
+        if not np.any(valid):
+            continue
+        idx = y[valid] * width + x[valid]
+        active = np.bincount(idx, minlength=height * width) > 0
+        counts += active.astype(np.int32)
 
-    if len(x) == 0:
-        return np.zeros((height, width), dtype=np.float32)
-
-    pixel_idx = y * width + x
-    combined_key = w_idx * (width * height) + pixel_idx
-    unique_keys = np.unique(combined_key)
-    unique_pixels = unique_keys % (width * height)
-
-    active_counts = np.bincount(unique_pixels, minlength=width * height)
-    frac_active = active_counts.reshape(height, width).astype(np.float32) / float(num_windows)
+    frac_active = (counts.astype(np.float32) / float(num_windows)).reshape(height, width)
     return frac_active
 
 
