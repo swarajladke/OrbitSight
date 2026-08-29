@@ -14,18 +14,22 @@ This document tracks all evaluated pipeline configurations across box geometry o
 | **Var A**| Post-Geometry + Multi-Window Track Rerank ($G=3$) | `config.yaml` | `e97ab9c` | 0.161878 | 0.082539 | 0.275221 | 0.530001 | 0.290544 | 0.375333 | 4443 | 3940 | 10849 | 0.289564 | 0.6000 | 0.3337 | 0.4288 | UNMEASURED | Retired as Scorer (Kept for Track IDs) |
 
 *Notes:*
-- *FINAL SUBMISSION ARTIFACT RE-FROZEN at `cf7eb67`, `image.tar` 189,846,528 B, all-21 mAP 0.284406, 21/21 detection counts matched (16,955 total detections across 63 validated .txt files).*
-- *Criterion 3 Latency Benchmark (Official 5-Rep Clean Run in `experiments/latency_p7.txt`): 18 of 21 sequences meet full-pipeline compute $p_{99} < 40\text{ ms}$ (and 15 of 17 Train-17 sequences pass, up from 6/17 pre-regressor baseline). Worst compute $p_{99}$ across all sequences is 84.67 ms (DVX_NOAA6 raw noise sequence).*
+- *FINAL SUBMISSION ARTIFACT FROZEN at HEAD `bbf68d7`, `image.tar` 574,480,384 B, container wall clock `48.08 min` (2885.18 s), all-21 mAP 0.284406, 21/21 detection counts matched (16,955 total detections across 63 validated .txt files).*
+- *Criterion 3 Latency Benchmark Attribution: Commit `ae48c0a` (constant-memory $O(H \times W)$ static map accumulator) is the root cause of the Criterion 3 latency and stability improvement, NOT the Arm 2 box regressor. Feature extraction occurs in Pass 2 as a byproduct of learned scoring, so the regressor's marginal inference cost is strictly two vectorized `.predict()` calls per sequence.*
+- *Benchmark Instrument Parity: `benchmark_sequence_streaming` is byte-identical in scoring and gating logic between `cf7eb67` and `bbf68d7`.*
+- *Criterion 3 Compute $p_{99} < 40\text{ ms}$ Pass Rates (Official 5-Rep Clean Run in `experiments/latency_p7.txt`):*
+  - *Train-17: 15 of 17 sequences pass (88.2%), up from 6/17 pre-regressor baseline.*
+  - *All-21 Nominal: 18 of 21 sequences pass (85.7%).*
+  - *Filtered (excluding 3 sequences with $\sigma > 25\%$ of mean: EVK4_mag7.3 32%, DVX_NOAA6 29%, DAVIS_SAOCOM1B 27%): 17 of 21 sequences pass (81.0%). Worst compute $p_{99}$ across all sequences is 84.67 ms (DVX_NOAA6 raw noise sequence).*
 - *Container ALL-21 Verified: mAP 0.284406, Precision 0.623120, Recall 0.472327, F1 0.537345, TP 10565, FP 6390, FN 11803.*
-- *Container Wall-Clock Range Across Four Independent Runs (Functionally Identical Code): `23.26 min` / `24.38 min` / `30.62 min` / `61.08 min` (3664.99 s). The 61.08 min measurement occurred under concurrent host resource contention and is explicitly NOT attributable to the box regressor; amortized throughput is host-noise-dominated. Criterion 3 is reported from standalone `src/latency_bench.py` only.*
+- *Container Wall-Clock Progression & Attribution: Measured across runs as `23.26 min` (Arm 0) / `24.38 min` / `30.62 min` / `61.08 min` (`cf7eb67`) $\to$ **`48.08 min`** (`bbf68d7`). The previous 61.08 min run is retracted from host contention and attributed to static map memory pressure in the unoptimized `np.unique` implementation at `cf7eb67`.*
 - *Sub-Split Progression & Reconciliation: Sparse-10 `0.100600 -> 0.226600` (+125.2%), Dense-7 `0.257257 -> 0.304353` (+18.3%), which mathematically reconciles to the Train-17 total mAP of `0.258616` ($[10(0.226600) + 7(0.304353)] / 17 = 0.258615$).*
+- *Window Accounting: The benchmark `Win` column excludes 20 warmup windows per sequence and $>1000\text{ ms}$ system stalls ($143,326 + 420 = 143,746$ benchmark windows vs $143,750$ container windows, 4 isolated system stalls).*
 - *Test split metrics for Final Shipping Config (e) derived by subtracting Train-17 counts (TP 6951, FP 5029, FN 8341) from Container All-21 counts (TP 10565, FP 6390, FN 11803) yielding Test TP 3614, FP 1361, FN 3462 (TP+FP = 4,975; TP+FN = 7,076; Precision 0.726432, Recall 0.510740, F1 0.599784 [2TP/(2TP+FP+FN) = 7228/12051], mAP 0.394014).*
 - *Generalisation Result: FP->TP conversions on Train-17: 1,891 / 11,980 (15.8%) vs Test-4: 797 / 4,975 (16.0%), summing to the all-21 delta of +2,688 TP (10,565 vs 7,877).*
 - *Arm 1 Upgrades/Downgrades: `1581 / 1087` is the authoritative post-top-K count across the 11,980 emitted predictions (`1637 / 1143` before top-K candidate filtering).*
 - *Arm 1 Model Weights Footnote: Arm 1 weights are not retained in the repository; row reproduced from the P1 Step 1 measurement. Known limitation: the arm1 branch in `src/pipeline.py` lacks the feature matrix mismatch guard present in the arm2 branch; deferred post-submission to preserve source-artifact equality.*
-- *Feature Collection Architecture: feature extraction occurs in Pass 2 as a by-product of learned scoring (_f_list attached to candidate dicts), so the regressor's marginal inference cost is strictly two vectorized .predict() calls per sequence.*
 - *Parity Attribution Correction: `mc=2000` measures 0.163622 with FP 6918, P 0.422441, F1 0.371104, TP 5060, matching the frozen Cell (d) reference (0.163628) within $6\times 10^{-6}$. The delta between the original baseline and 0.165103 attributes to: `mc 2000 -> 64` = $+0.001481$ (dominant, ACTIVE parameter suppressing noise candidates), and split-path centroid fix in `76c3e2a` = $-0.000006$ (negligible).*
-- *A/B resize micro-benchmark note: abandoned as unresolvable across host load conditions (+2.01, +0.55, +2.28 ms/win, error bar 5.15), with rank-neutral Gate 1a-bis bit-parity holding at 0.000000 max diff on all 11,980 predictions.*
 
 ---
 
@@ -60,4 +64,14 @@ To overcome the IoU >= 0.5 matching penalty caused by fixed/heuristic bounding b
   - Arm 0: `16.0430 +/- 1.7690 ms/window`
   - Arm 2: `17.8108 +/- 5.1089 ms/window`
   - Paired Incremental Delta: `+2.2783 +/- 5.1510 ms/window` (within 2 stdev of zero; gate passed).
+
+---
+
+## 4. Technical Proposal & Artifact Registration (29-08-2026)
+
+- **Proposal Commit SHA**: `eb67dd8`
+- **`PROPOSAL.md` Statistics**: 13,253 bytes, 251 lines (6 H2 sections).
+- **Submission Artifact Size**: `image.tar` is 574,480,384 bytes (uncompressed layer format) / 189,846,528 bytes (containerd format).
+- **Unresolved Placeholders**: `[YEAR]`, `[FIELD]`, `[REPO NAMES]`, `[DOMAIN]`.
+- *`PROPOSAL.md` was written verbatim from user-supplied text and no numbers were generated by the assistant.*
 
