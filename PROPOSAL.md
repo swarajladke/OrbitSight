@@ -5,11 +5,10 @@
 
 Neuromorphic vision sensors observing resident space objects produce sparse,
 asynchronous event streams in which a target may generate only a handful of
-events per 40 ms window, embedded in background star fields, hot pixels and
-sensor noise. The detection problem is not primarily one of classification
-capacity — it is one of **ranking a very small number of true detections above
-a very large number of plausible noise components**, under a strict IoU ≥ 0.5
-localisation requirement, in real time, on CPU.
+events per 40 ms window, embedded in star fields, hot pixels and sensor
+noise. The problem is not classification capacity - it is **ranking a very
+small number of true detections above a very large number of plausible noise
+components**, under a strict IoU >= 0.5 requirement, in real time, on CPU.
 
 OrbitSight is a four-pass event-native pipeline: connected-component candidate
 proposal on per-window event count maps, a learned candidate scorer over 13
@@ -17,11 +16,10 @@ geometric and temporal features, a learned window-level objectness gate over 21
 features spanning three consecutive windows, and a post-hoc bounding-box
 regressor that corrects box dimensions without disturbing detection ranking.
 
-The system is delivered as a self-contained offline Docker image. It reads
-`/OrbitSight_dataset`, requires no network, and writes conformant per-sequence
-`.txt` predictions plus `Evaluation_Metrics.xlsx` to `/work/orbitsight/DDMMYYYY`.
-It has been executed five times end-to-end with **byte-identical detection
-output on every run**.
+Delivered as a self-contained offline Docker image: it reads
+`/OrbitSight_dataset`, requires no network, and writes conformant `.txt`
+predictions plus `Evaluation_Metrics.xlsx` to `/work/orbitsight/DDMMYYYY`.
+Five end-to-end runs have produced **byte-identical detection output**.
 
 ## 2. Outcome Metrics
 
@@ -43,16 +41,10 @@ configuration.
 ### 2.2 Independent verification
 
 The in-process metrics harness was checked against the official `evaluate.py`
-on the container's own output:
-
-| Metric | Official `evaluate.py` | `src/metrics.py` | Abs difference |
-|---|---|---|---|
-| mAP @ IoU 0.5 | 0.284406 | 0.284406 | 5.55e-17 |
-| Precision / Recall / F1 | 0.623120 / 0.472327 / 0.537345 | identical | 0 |
-| TP / FP / FN | 10,565 / 6,390 / 11,803 | identical | 0 |
-
-Agreement is exact to floating-point representation. Every accuracy claim in
-this proposal is therefore expressed in the evaluator's own terms.
+on the container's own output. Precision, recall, F1 and the TP/FP/FN counts
+match exactly, at absolute difference 0; mAP matches to **5.55e-17**, the
+limit of floating-point representation. Every accuracy claim here is
+therefore expressed in the evaluator's own terms.
 
 ### 2.3 Real-time performance
 
@@ -67,11 +59,11 @@ repetitions, excluding 20 warmup windows per sequence.
 | < 40 ms, excluding runs with σ > 25% of mean | **17 of 21** |
 | < 40 ms, training split | **15 of 17**, up from 6 of 17 |
 
-Best case is 14.99 ± 0.1 ms (`DAVIS_Filtered_NOAA6`). Three sequences exceed
-the budget: `DVX_NOAA6` 84.67 ± 24.5 ms, `EVK4_mag7.3` 77.76 ± 24.9 ms and
-`EVK4_mag5.2` 58.73 ± 2.7 ms — the two highest-resolution recordings and the
-densest DVX stream. `EVK4_mag7.3` has been the worst case in every measurement
-taken, which we regard as evidence the instrument is stable rather than noisy.
+Best case is 14.99 +/- 0.1 ms (`DAVIS_Filtered_NOAA6`). Three sequences exceed
+the budget - `DVX_NOAA6` 84.67 ms, `EVK4_mag7.3` 77.76 ms and `EVK4_mag5.2`
+58.73 ms - the two highest-resolution recordings and the densest DVX stream.
+`EVK4_mag7.3` has been the worst case in every measurement taken, which
+indicates a stable instrument rather than a noisy one.
 
 **Disclosure.** The 6-of-17 → 15-of-17 improvement is attributable to replacing
 a per-window-materialising static-source map with a constant-memory
@@ -83,12 +75,11 @@ total throughput for bounded memory and improved tail latency. Since Criterion 3
 scores per-window latency and the container has no wall-clock constraint, we
 consider this the correct trade.
 
-**Latency semantics.** The pipeline consumes 40 ms windows and uses one window
-of lookahead for temporal persistence features. End-to-end latency is therefore
-one window period plus compute. We report compute p99 because it determines
-whether the system keeps pace with the sensor without backlog; the fixed 40 ms
-window latency is an inherent property of any window-based method at this
-cadence, and we state it explicitly rather than folding it into a single number.
+**Latency semantics.** The pipeline consumes 40 ms windows with one window of
+lookahead, so end-to-end latency is one window period plus compute. We report
+compute p99 because it determines whether the system keeps pace with the
+sensor; the fixed 40 ms window cost is inherent to any window-based method at
+this cadence and we state it rather than fold it into a single number.
 
 ### 2.4 Generalisation
 
@@ -111,12 +102,15 @@ weakest. On the ten sparse sequences (GT ≤ 43 boxes) mAP rises 0.100600 →
 container has been run five times across five commits with identical detection
 counts and identical mAP to six decimals. The submitted image is built from the
 exact commit in the repository, and in-process metrics agree with the official
-evaluator to 5.6e-17. Nothing in this proposal is estimated.
+evaluator to 5.6e-17. Nothing here is estimated. Two configurations that
+improved precision, recall and F1 while *reducing* mAP were diagnosed rather
+than shipped; that diagnosis - the metric was ranking-limited, not
+recall-limited - produced the +49.1% gain in all-21 mAP.
 
-**CPU-only and genuinely offline.** Three gradient-boosted tree models totalling
-1.5 MB, eight pinned dependencies, no GPU, no network. Cold start is
-sub-second. On the stated evaluation hardware this is a deployable configuration
-rather than a research prototype requiring accelerators.
+**CPU-only and genuinely offline.** Three gradient-boosted tree models
+totalling 1.5 MB, eight pinned dependencies, no GPU, no network. Cold start is
+sub-second - a deployable configuration on the stated evaluation hardware,
+not a research prototype requiring accelerators.
 
 **Resolution compatibility is structural, not tuned.** Sensor identification is
 by exact resolution match with a nearest-diagonal fallback, and per-sensor
@@ -125,23 +119,17 @@ width and height are explicit regressor inputs, so box prediction adapts to
 resolution rather than assuming one. An unseen sensor geometry maps to the
 nearest known profile and runs without code changes.
 
-**The measurement discipline is the differentiator.** Two configurations that
-improved precision, recall and F1 while *reducing* mAP were diagnosed rather
-than shipped. That diagnosis — that the metric was ranking-limited, not
-recall-limited — is what produced the +49.1% improvement. We document the
-failures alongside the result.
-
 ## 4. Technical Approach and Architecture
 
 ### 4.1 Pipeline
 
-**Pass 1 — proposal.** Events in each 40 ms window are accumulated into a count
-map. Adaptive percentile thresholding escalates with window density
-(`percentile + (nonzero − 1000)/500`, capped at 99.0) so bright frames do not
-flood the component stage. `cv2.connectedComponentsWithStats` yields components,
-which are ranked by event count and truncated. Oversized components are
-re-thresholded and split. A continuous static-source map — the fraction of
-windows in which each pixel is active — suppresses stars and hot pixels.
+**Pass 1 — proposal.** Events in each 40 ms window are accumulated into a
+count map. Adaptive percentile thresholding escalates with window density
+(capped at 99.0) so bright frames do not flood the component stage.
+`cv2.connectedComponentsWithStats` yields components, ranked by event count
+and truncated, with oversized ones re-thresholded and split. A continuous
+static-source map - the fraction of windows in which each pixel is active -
+suppresses stars and hot pixels.
 
 **Pass 2 — candidate scoring.** Candidates are matched to the previous and next
 windows by centroid distance to produce a persistence count; single-window
@@ -172,10 +160,9 @@ The shipped design instead applies regression **after** ranking is finalised.
 Centroids, timestamps, confidences and rank order are preserved bit-for-bit;
 only width and height change. This is verifiable rather than asserted: total
 detections are **invariant at 16,955** before and after, so the regressor
-cannot have altered any ranking decision. Features are gathered during Pass 2
-as a by-product of candidate scoring, and each sequence's surviving boxes are
-resized in two vectorised `predict()` calls over log-width and log-height,
-exponentiated and clamped per sensor.
+cannot have altered any ranking decision. Features are gathered during Pass 2 as a by-product of scoring; surviving
+boxes are resized in two vectorised `predict()` calls over log-width and
+log-height, then exponentiated and clamped per sensor.
 
 ### 4.3 Ablation
 
@@ -206,50 +193,41 @@ documentation.
 
 A visualisation tool renders annotated video at all three sensor resolutions
 with ground-truth and predicted boxes, confidences and track identifiers.
-Predictions are emitted as tab-separated files with a header row in the
-evaluator's field names, one row per detection, with `class_id = 0` throughout —
-the challenge defines a single RSO class and we do not infer a taxonomy we
-cannot validate.
+Predictions are tab-separated with a header row in the evaluator's field
+names, one row per detection, `class_id = 0` throughout - the challenge
+defines a single RSO class and we do not infer a taxonomy we cannot validate.
 
 ## 5. Team Capacity
 
 OrbitSight is a solo entry by a postgraduate Computer Science student. The capacity claim is
 measurement discipline rather than headcount.
 
-Every quantitative statement here came from a logged command. The container was
-run five times across five commits with identical detection counts and identical
-mAP; in-process metrics were verified against the official evaluator to 5.6e-17.
-Ten configurations were evaluated on the training split and recorded in
-`experiments/CONFIG_LEDGER.md` with commit SHAs, so each number traces to the
-code that produced it.
-
-Promotion was gated on explicit invariants: container output must match the
-research harness, and the box regressor must leave centroids, confidences and
-rank order bit-identical — enforced across all 11,980 training predictions.
+Every quantitative statement here came from a logged command. The container
+was run five times across five commits with identical detection counts and
+identical mAP; in-process metrics were verified against the official
+evaluator to 5.6e-17. Ten configurations were evaluated on the training split
+and recorded in `experiments/CONFIG_LEDGER.md` with commit SHAs. Promotion was
+gated on explicit invariants: container output must match the research
+harness, and the box regressor must leave centroids, confidences and rank
+order bit-identical across all 11,980 training predictions.
 
 Two instrumentation errors were found and corrected rather than absorbed: an
-in-container latency check that reported an amortised mean over one of two
+in-container latency check reporting an amortised mean over one of two
 pipeline passes, replaced by a full-pipeline streaming benchmark; and a
-container slowdown initially misattributed to host load, traced to memory
-pressure in the static-source map. The pessimistic figures are the ones
-reported.
+container slowdown misattributed to host load, traced to memory pressure in
+the static-source map. The pessimistic figures are the ones reported.
 
 ## 6. Prior Work
 
 OrbitSight is my first project in event-based vision and space situational
 awareness; I claim no prior domain work. The proof of concept is this
-submission, and it is complete rather than conceptual: a working offline
-container, a resolution-adaptive detector across three sensors, three trained
-models with documented hyperparameters and validation metrics, a visualisation
-tool, a metrics harness verified against the official evaluator, and a
-reproducible training path with the exact configuration used for the submitted
-weights.
+submission itself - a working offline container with trained weights, a
+verified metrics harness and a reproducible training path.
 
-Prior work is in neural networks, pursued self-directed over the past year and
-currently focused on continual learning - adapting models to new distributions
-without discarding earlier competence. That background informed a choice this
-submission makes deliberately: OrbitSight uses no deep network. Against sparse
-event input, a CPU-only 40 ms budget and 8,104 box-regressor training samples,
-gradient-boosted trees over hand-designed features were the better-matched
-family, and the four-arm ablation in Section 4.3 is the quantitative case for
-that decision.
+Prior work is in neural networks, self-directed over the past year and
+currently focused on continual learning - adapting models to new
+distributions without discarding earlier competence. That background informed
+a deliberate choice: OrbitSight uses no deep network. Against sparse event
+input, a CPU-only 40 ms budget and 8,104 training samples, gradient-boosted
+trees over hand-designed features were better matched, and the Section 4.3
+ablation is the quantitative case.
