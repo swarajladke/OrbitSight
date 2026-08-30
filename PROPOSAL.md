@@ -238,12 +238,9 @@ reported.
 
 OrbitSight is my first project in event-based vision and space situational
 awareness; I claim no prior domain work. The proof of concept is this
-submission, and it is complete rather than conceptual: a working offline
-container, a resolution-adaptive detector across three sensors, three trained
-models with documented hyperparameters and validation metrics, a visualisation
-tool, a metrics harness verified against the official evaluator, and a
-reproducible training path with the exact configuration used for the submitted
-weights.
+submission itself - a working offline container with trained weights, a
+verified metrics harness and a reproducible training path - rather than a
+concept awaiting implementation.
 
 Prior work is in neural networks, pursued self-directed over the past year and
 currently focused on continual learning - adapting models to new distributions
