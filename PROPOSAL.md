@@ -197,7 +197,7 @@ Predictions are tab-separated with a header row in the evaluator's field
 names, one row per detection, `class_id = 0` throughout - the challenge
 defines a single RSO class and we do not infer a taxonomy we cannot validate.
 
-<img src="C:/Users/Vicky/Desktop/OrbitSight/OrbitSight_Research/experiments/frames/evk4_0104.png" width="380">
+<img src="C:/Users/Vicky/Desktop/OrbitSight/OrbitSight_Research/experiments/frames/evk4_0104.png" width="240">
 
 **Figure 1.** Single 40 ms window, EVK4 sensor at 1280x720. Green: ground truth. Orange: OrbitSight prediction with confidence and track identifier. Rendered by `src/visualize.py`, which ships inside the submitted image.
 
