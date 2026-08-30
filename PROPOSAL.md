@@ -213,7 +213,7 @@ cannot validate.
 
 ## 5. Team Capacity
 
-OrbitSight is a solo entry by a [YEAR] [FIELD] student. The capacity claim is
+OrbitSight is a solo entry by a postgraduate Computer Science student. The capacity claim is
 measurement discipline rather than headcount.
 
 Every quantitative statement here came from a logged command. The container was
@@ -245,6 +245,11 @@ tool, a metrics harness verified against the official evaluator, and a
 reproducible training path with the exact configuration used for the submitted
 weights.
 
-Prior engineering practice is evidenced by [REPO NAMES], covering [DOMAIN] —
-unrelated to neuromorphic sensing; relevant as practice in shipping working
-systems.
+Prior work is in neural networks, pursued self-directed over the past year and
+currently focused on continual learning - adapting models to new distributions
+without discarding earlier competence. That background informed a choice this
+submission makes deliberately: OrbitSight uses no deep network. Against sparse
+event input, a CPU-only 40 ms budget and 8,104 box-regressor training samples,
+gradient-boosted trees over hand-designed features were the better-matched
+family, and the four-arm ablation in Section 4.3 is the quantitative case for
+that decision.
