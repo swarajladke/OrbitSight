@@ -17,11 +17,10 @@ geometric and temporal features, a learned window-level objectness gate over 21
 features spanning three consecutive windows, and a post-hoc bounding-box
 regressor that corrects box dimensions without disturbing detection ranking.
 
-The system is delivered as a self-contained offline Docker image. It reads
-`/OrbitSight_dataset`, requires no network, and writes conformant per-sequence
-`.txt` predictions plus `Evaluation_Metrics.xlsx` to `/work/orbitsight/DDMMYYYY`.
-It has been executed five times end-to-end with **byte-identical detection
-output on every run**.
+Delivered as a self-contained offline Docker image: it reads
+`/OrbitSight_dataset`, requires no network, and writes conformant `.txt`
+predictions plus `Evaluation_Metrics.xlsx` to `/work/orbitsight/DDMMYYYY`.
+Five end-to-end runs have produced **byte-identical detection output**.
 
 ## 2. Outcome Metrics
 
@@ -51,8 +50,8 @@ on the container's own output:
 | Precision / Recall / F1 | 0.623120 / 0.472327 / 0.537345 | identical | 0 |
 | TP / FP / FN | 10,565 / 6,390 / 11,803 | identical | 0 |
 
-Agreement is exact to floating-point representation. Every accuracy claim in
-this proposal is therefore expressed in the evaluator's own terms.
+Agreement is exact to floating-point representation; every accuracy claim
+here is expressed in the evaluator's own terms.
 
 ### 2.3 Real-time performance
 
@@ -83,12 +82,11 @@ total throughput for bounded memory and improved tail latency. Since Criterion 3
 scores per-window latency and the container has no wall-clock constraint, we
 consider this the correct trade.
 
-**Latency semantics.** The pipeline consumes 40 ms windows and uses one window
-of lookahead for temporal persistence features. End-to-end latency is therefore
-one window period plus compute. We report compute p99 because it determines
-whether the system keeps pace with the sensor without backlog; the fixed 40 ms
-window latency is an inherent property of any window-based method at this
-cadence, and we state it explicitly rather than folding it into a single number.
+**Latency semantics.** The pipeline consumes 40 ms windows with one window of
+lookahead, so end-to-end latency is one window period plus compute. We report
+compute p99 because it determines whether the system keeps pace with the
+sensor; the fixed 40 ms window cost is inherent to any window-based method at
+this cadence and we state it rather than fold it into a single number.
 
 ### 2.4 Generalisation
 
@@ -111,7 +109,10 @@ weakest. On the ten sparse sequences (GT ≤ 43 boxes) mAP rises 0.100600 →
 container has been run five times across five commits with identical detection
 counts and identical mAP to six decimals. The submitted image is built from the
 exact commit in the repository, and in-process metrics agree with the official
-evaluator to 5.6e-17. Nothing in this proposal is estimated.
+evaluator to 5.6e-17. Nothing here is estimated. Two configurations that
+improved precision, recall and F1 while *reducing* mAP were diagnosed rather
+than shipped; that diagnosis - the metric was ranking-limited, not
+recall-limited - produced the +49.1% gain in all-21 mAP.
 
 **CPU-only and genuinely offline.** Three gradient-boosted tree models totalling
 1.5 MB, eight pinned dependencies, no GPU, no network. Cold start is
@@ -125,23 +126,17 @@ width and height are explicit regressor inputs, so box prediction adapts to
 resolution rather than assuming one. An unseen sensor geometry maps to the
 nearest known profile and runs without code changes.
 
-**The measurement discipline is the differentiator.** Two configurations that
-improved precision, recall and F1 while *reducing* mAP were diagnosed rather
-than shipped. That diagnosis — that the metric was ranking-limited, not
-recall-limited — is what produced the +49.1% improvement. We document the
-failures alongside the result.
-
 ## 4. Technical Approach and Architecture
 
 ### 4.1 Pipeline
 
-**Pass 1 — proposal.** Events in each 40 ms window are accumulated into a count
-map. Adaptive percentile thresholding escalates with window density
-(`percentile + (nonzero − 1000)/500`, capped at 99.0) so bright frames do not
-flood the component stage. `cv2.connectedComponentsWithStats` yields components,
-which are ranked by event count and truncated. Oversized components are
-re-thresholded and split. A continuous static-source map — the fraction of
-windows in which each pixel is active — suppresses stars and hot pixels.
+**Pass 1 — proposal.** Events in each 40 ms window are accumulated into a
+count map. Adaptive percentile thresholding escalates with window density
+(capped at 99.0) so bright frames do not flood the component stage.
+`cv2.connectedComponentsWithStats` yields components, ranked by event count
+and truncated, with oversized ones re-thresholded and split. A continuous
+static-source map - the fraction of windows in which each pixel is active -
+suppresses stars and hot pixels.
 
 **Pass 2 — candidate scoring.** Candidates are matched to the previous and next
 windows by centroid distance to produce a persistence count; single-window
@@ -216,16 +211,14 @@ cannot validate.
 OrbitSight is a solo entry by a postgraduate Computer Science student. The capacity claim is
 measurement discipline rather than headcount.
 
-Every quantitative statement here came from a logged command. The container was
-run five times across five commits with identical detection counts and identical
-mAP; in-process metrics were verified against the official evaluator to 5.6e-17.
-Ten configurations were evaluated on the training split and recorded in
-`experiments/CONFIG_LEDGER.md` with commit SHAs, so each number traces to the
-code that produced it.
-
-Promotion was gated on explicit invariants: container output must match the
-research harness, and the box regressor must leave centroids, confidences and
-rank order bit-identical — enforced across all 11,980 training predictions.
+Every quantitative statement here came from a logged command. The container
+was run five times across five commits with identical detection counts and
+identical mAP; in-process metrics were verified against the official
+evaluator to 5.6e-17. Ten configurations were evaluated on the training split
+and recorded in `experiments/CONFIG_LEDGER.md` with commit SHAs. Promotion was
+gated on explicit invariants: container output must match the research
+harness, and the box regressor must leave centroids, confidences and rank
+order bit-identical across all 11,980 training predictions.
 
 Two instrumentation errors were found and corrected rather than absorbed: an
 in-container latency check that reported an amortised mean over one of two
