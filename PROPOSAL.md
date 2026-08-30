@@ -107,10 +107,10 @@ improved precision, recall and F1 while *reducing* mAP were diagnosed rather
 than shipped; that diagnosis - the metric was ranking-limited, not
 recall-limited - produced the +49.1% gain in all-21 mAP.
 
-**CPU-only and genuinely offline.** Three gradient-boosted tree models totalling
-1.5 MB, eight pinned dependencies, no GPU, no network. Cold start is
-sub-second. On the stated evaluation hardware this is a deployable configuration
-rather than a research prototype requiring accelerators.
+**CPU-only and genuinely offline.** Three gradient-boosted tree models
+totalling 1.5 MB, eight pinned dependencies, no GPU, no network. Cold start is
+sub-second - a deployable configuration on the stated evaluation hardware,
+not a research prototype requiring accelerators.
 
 **Resolution compatibility is structural, not tuned.** Sensor identification is
 by exact resolution match with a nearest-diagonal fallback, and per-sensor
@@ -193,10 +193,9 @@ documentation.
 
 A visualisation tool renders annotated video at all three sensor resolutions
 with ground-truth and predicted boxes, confidences and track identifiers.
-Predictions are emitted as tab-separated files with a header row in the
-evaluator's field names, one row per detection, with `class_id = 0` throughout —
-the challenge defines a single RSO class and we do not infer a taxonomy we
-cannot validate.
+Predictions are tab-separated with a header row in the evaluator's field
+names, one row per detection, `class_id = 0` throughout - the challenge
+defines a single RSO class and we do not infer a taxonomy we cannot validate.
 
 ## 5. Team Capacity
 
@@ -213,25 +212,22 @@ harness, and the box regressor must leave centroids, confidences and rank
 order bit-identical across all 11,980 training predictions.
 
 Two instrumentation errors were found and corrected rather than absorbed: an
-in-container latency check that reported an amortised mean over one of two
+in-container latency check reporting an amortised mean over one of two
 pipeline passes, replaced by a full-pipeline streaming benchmark; and a
-container slowdown initially misattributed to host load, traced to memory
-pressure in the static-source map. The pessimistic figures are the ones
-reported.
+container slowdown misattributed to host load, traced to memory pressure in
+the static-source map. The pessimistic figures are the ones reported.
 
 ## 6. Prior Work
 
 OrbitSight is my first project in event-based vision and space situational
 awareness; I claim no prior domain work. The proof of concept is this
 submission itself - a working offline container with trained weights, a
-verified metrics harness and a reproducible training path - rather than a
-concept awaiting implementation.
+verified metrics harness and a reproducible training path.
 
-Prior work is in neural networks, pursued self-directed over the past year and
-currently focused on continual learning - adapting models to new distributions
-without discarding earlier competence. That background informed a choice this
-submission makes deliberately: OrbitSight uses no deep network. Against sparse
-event input, a CPU-only 40 ms budget and 8,104 box-regressor training samples,
-gradient-boosted trees over hand-designed features were the better-matched
-family, and the four-arm ablation in Section 4.3 is the quantitative case for
-that decision.
+Prior work is in neural networks, self-directed over the past year and
+currently focused on continual learning - adapting models to new
+distributions without discarding earlier competence. That background informed
+a deliberate choice: OrbitSight uses no deep network. Against sparse event
+input, a CPU-only 40 ms budget and 8,104 training samples, gradient-boosted
+trees over hand-designed features were better matched, and the Section 4.3
+ablation is the quantitative case.
