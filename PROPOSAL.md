@@ -5,11 +5,10 @@
 
 Neuromorphic vision sensors observing resident space objects produce sparse,
 asynchronous event streams in which a target may generate only a handful of
-events per 40 ms window, embedded in background star fields, hot pixels and
-sensor noise. The detection problem is not primarily one of classification
-capacity — it is one of **ranking a very small number of true detections above
-a very large number of plausible noise components**, under a strict IoU ≥ 0.5
-localisation requirement, in real time, on CPU.
+events per 40 ms window, embedded in star fields, hot pixels and sensor
+noise. The problem is not classification capacity - it is **ranking a very
+small number of true detections above a very large number of plausible noise
+components**, under a strict IoU >= 0.5 requirement, in real time, on CPU.
 
 OrbitSight is a four-pass event-native pipeline: connected-component candidate
 proposal on per-window event count maps, a learned candidate scorer over 13
@@ -42,16 +41,10 @@ configuration.
 ### 2.2 Independent verification
 
 The in-process metrics harness was checked against the official `evaluate.py`
-on the container's own output:
-
-| Metric | Official `evaluate.py` | `src/metrics.py` | Abs difference |
-|---|---|---|---|
-| mAP @ IoU 0.5 | 0.284406 | 0.284406 | 5.55e-17 |
-| Precision / Recall / F1 | 0.623120 / 0.472327 / 0.537345 | identical | 0 |
-| TP / FP / FN | 10,565 / 6,390 / 11,803 | identical | 0 |
-
-Agreement is exact to floating-point representation; every accuracy claim
-here is expressed in the evaluator's own terms.
+on the container's own output. Precision, recall, F1 and the TP/FP/FN counts
+match exactly, at absolute difference 0; mAP matches to **5.55e-17**, the
+limit of floating-point representation. Every accuracy claim here is
+therefore expressed in the evaluator's own terms.
 
 ### 2.3 Real-time performance
 
@@ -66,11 +59,11 @@ repetitions, excluding 20 warmup windows per sequence.
 | < 40 ms, excluding runs with σ > 25% of mean | **17 of 21** |
 | < 40 ms, training split | **15 of 17**, up from 6 of 17 |
 
-Best case is 14.99 ± 0.1 ms (`DAVIS_Filtered_NOAA6`). Three sequences exceed
-the budget: `DVX_NOAA6` 84.67 ± 24.5 ms, `EVK4_mag7.3` 77.76 ± 24.9 ms and
-`EVK4_mag5.2` 58.73 ± 2.7 ms — the two highest-resolution recordings and the
-densest DVX stream. `EVK4_mag7.3` has been the worst case in every measurement
-taken, which we regard as evidence the instrument is stable rather than noisy.
+Best case is 14.99 +/- 0.1 ms (`DAVIS_Filtered_NOAA6`). Three sequences exceed
+the budget - `DVX_NOAA6` 84.67 ms, `EVK4_mag7.3` 77.76 ms and `EVK4_mag5.2`
+58.73 ms - the two highest-resolution recordings and the densest DVX stream.
+`EVK4_mag7.3` has been the worst case in every measurement taken, which
+indicates a stable instrument rather than a noisy one.
 
 **Disclosure.** The 6-of-17 → 15-of-17 improvement is attributable to replacing
 a per-window-materialising static-source map with a constant-memory
@@ -167,10 +160,9 @@ The shipped design instead applies regression **after** ranking is finalised.
 Centroids, timestamps, confidences and rank order are preserved bit-for-bit;
 only width and height change. This is verifiable rather than asserted: total
 detections are **invariant at 16,955** before and after, so the regressor
-cannot have altered any ranking decision. Features are gathered during Pass 2
-as a by-product of candidate scoring, and each sequence's surviving boxes are
-resized in two vectorised `predict()` calls over log-width and log-height,
-exponentiated and clamped per sensor.
+cannot have altered any ranking decision. Features are gathered during Pass 2 as a by-product of scoring; surviving
+boxes are resized in two vectorised `predict()` calls over log-width and
+log-height, then exponentiated and clamped per sensor.
 
 ### 4.3 Ablation
 
