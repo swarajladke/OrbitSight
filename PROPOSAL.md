@@ -99,12 +99,11 @@ weakest. On the ten sparse sequences (GT ≤ 43 boxes) mAP rises 0.100600 →
 **Every number is reproducible, and the artifact is the evidence.** The
 container has been run six times with identical detection counts, the last
 three on the shipped configuration with identical mAP to six decimals. The
-submitted image is built from the
-exact commit in the repository, and in-process metrics agree with the official
-evaluator to 5.6e-17. Nothing here is estimated. Two configurations that
-improved precision, recall and F1 while *reducing* mAP were diagnosed rather
-than shipped; that diagnosis - the metric was ranking-limited, not
-recall-limited - produced the +49.1% gain in all-21 mAP.
+submitted image is built from the exact commit in the repository, and
+in-process metrics agree with the official evaluator to 5.6e-17. Nothing here
+is estimated. Two configurations that improved precision, recall and F1 while
+*reducing* mAP were diagnosed rather than shipped; that diagnosis - the metric
+was ranking-limited, not recall-limited - produced the +49.1% gain in all-21 mAP.
 
 **CPU-only and genuinely offline.** Three gradient-boosted tree models
 totalling 1.5 MB, eight pinned dependencies, no GPU, no network. Cold start is
@@ -158,9 +157,10 @@ The shipped design instead applies regression **after** ranking is finalised.
 Centroids, timestamps, confidences and rank order are preserved bit-for-bit;
 only width and height change. This is verifiable rather than asserted: total
 detections are **invariant at 16,955** before and after, so the regressor
-cannot have altered any ranking decision. Features are gathered during Pass 2 as a by-product of scoring; surviving
-boxes are resized in two vectorised `predict()` calls over log-width and
-log-height, then exponentiated and clamped per sensor.
+cannot have altered any ranking decision. Features are gathered during Pass 2
+as a by-product of scoring; surviving boxes are resized in two vectorised
+`predict()` calls over log-width and log-height, then exponentiated and
+clamped per sensor.
 
 ### 4.3 Ablation
 
@@ -197,18 +197,17 @@ defines a single RSO class and we do not infer a taxonomy we cannot validate.
 
 ## 5. Team Capacity
 
-OrbitSight is a solo entry by a postgraduate Computer Science student. The capacity claim is
-measurement discipline rather than headcount.
+OrbitSight is a solo entry by a postgraduate Computer Science student. The
+capacity claim is measurement discipline rather than headcount.
 
 Every quantitative statement here came from a logged command. The container
 was run six times with identical detection counts, the last three on the
 shipped configuration with identical mAP; in-process metrics were verified
-against the official
-evaluator to 5.6e-17. Ten configurations were evaluated on the training split
-and recorded in `experiments/CONFIG_LEDGER.md` with commit SHAs. Promotion was
-gated on explicit invariants: container output must match the research
-harness, and the box regressor must leave centroids, confidences and rank
-order bit-identical across all 11,980 training predictions.
+against the official evaluator to 5.6e-17. Ten configurations were evaluated
+on the training split and recorded in `experiments/CONFIG_LEDGER.md` with
+commit SHAs. Promotion was gated on explicit invariants: container output must
+match the research harness, and the box regressor must leave centroids,
+confidences and rank order bit-identical across all 11,980 training predictions.
 
 Two instrumentation errors were found and corrected rather than absorbed: an
 in-container latency check reporting an amortised mean over one of two
