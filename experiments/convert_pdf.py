@@ -111,6 +111,7 @@ h1 {
     font-weight: 700;
     margin-top: 0pt;
     margin-bottom: 3pt;
+    page-break-after: avoid;
     color: #0b2545;
     line-height: 1.1;
 }
@@ -162,6 +163,9 @@ table {
     font-size: 9.5pt;
     line-height: 1.0;
 }
+tr, td, th {
+    page-break-inside: avoid;
+}
 th, td {
     border: 1px solid #bbb;
     padding: 2.5pt 4.5pt;
@@ -185,6 +189,7 @@ img {
     width: 240pt;
     height: auto;
     display: block;
+    page-break-before: avoid;
     margin-top: 2pt;
     margin-bottom: 2pt;
 }
