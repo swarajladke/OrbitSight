@@ -19,7 +19,8 @@ regressor that corrects box dimensions without disturbing detection ranking.
 Delivered as a self-contained offline Docker image: it reads
 `/OrbitSight_dataset`, requires no network, and writes conformant `.txt`
 predictions plus `Evaluation_Metrics.xlsx` to `/work/orbitsight/DDMMYYYY`.
-Five end-to-end runs have produced **byte-identical detection output**.
+Six end-to-end runs have produced **identical detection counts**, and the
+three runs of the shipped configuration identical mAP to six decimals.
 
 ## 2. Outcome Metrics
 
@@ -62,8 +63,7 @@ repetitions, excluding 20 warmup windows per sequence.
 Best case is 14.99 +/- 0.1 ms (`DAVIS_Filtered_NOAA6`). Three sequences exceed
 the budget - `DVX_NOAA6` 84.67 ms, `EVK4_mag7.3` 77.76 ms and `EVK4_mag5.2`
 58.73 ms - the two highest-resolution recordings and the densest DVX stream.
-`EVK4_mag7.3` has been the worst case in every measurement taken, which
-indicates a stable instrument rather than a noisy one.
+`EVK4_mag7.3` has been the worst case in every measurement taken.
 
 **Disclosure.** The 6-of-17 → 15-of-17 improvement is attributable to replacing
 a per-window-materialising static-source map with a constant-memory
@@ -75,11 +75,9 @@ total throughput for bounded memory and improved tail latency. Since Criterion 3
 scores per-window latency and the container has no wall-clock constraint, we
 consider this the correct trade.
 
-**Latency semantics.** The pipeline consumes 40 ms windows with one window of
-lookahead, so end-to-end latency is one window period plus compute. We report
-compute p99 because it determines whether the system keeps pace with the
-sensor; the fixed 40 ms window cost is inherent to any window-based method at
-this cadence and we state it rather than fold it into a single number.
+**Latency semantics.** With one window of lookahead, end-to-end latency is one
+40 ms window period plus compute. We report compute p99 because it determines
+whether the system keeps pace with the sensor - the window cost is inherent.
 
 ### 2.4 Generalisation
 
@@ -99,8 +97,9 @@ weakest. On the ten sparse sequences (GT ≤ 43 boxes) mAP rises 0.100600 →
 ## 3. Value Proposition and Competitive Positioning
 
 **Every number is reproducible, and the artifact is the evidence.** The
-container has been run five times across five commits with identical detection
-counts and identical mAP to six decimals. The submitted image is built from the
+container has been run six times with identical detection counts, the last
+three on the shipped configuration with identical mAP to six decimals. The
+submitted image is built from the
 exact commit in the repository, and in-process metrics agree with the official
 evaluator to 5.6e-17. Nothing here is estimated. Two configurations that
 improved precision, recall and F1 while *reducing* mAP were diagnosed rather
@@ -113,11 +112,10 @@ sub-second - a deployable configuration on the stated evaluation hardware,
 not a research prototype requiring accelerators.
 
 **Resolution compatibility is structural, not tuned.** Sensor identification is
-by exact resolution match with a nearest-diagonal fallback, and per-sensor
-geometry, thresholds and dimension clamps resolve from configuration. Frame
-width and height are explicit regressor inputs, so box prediction adapts to
-resolution rather than assuming one. An unseen sensor geometry maps to the
-nearest known profile and runs without code changes.
+by exact resolution match with a nearest-diagonal fallback; per-sensor geometry,
+thresholds and clamps resolve from configuration. Frame width and height are
+explicit regressor inputs, so an unseen geometry maps to the nearest profile and
+runs without code changes.
 
 ## 4. Technical Approach and Architecture
 
@@ -197,16 +195,15 @@ Predictions are tab-separated with a header row in the evaluator's field
 names, one row per detection, `class_id = 0` throughout - the challenge
 defines a single RSO class and we do not infer a taxonomy we cannot validate.
 
-
-
 ## 5. Team Capacity
 
 OrbitSight is a solo entry by a postgraduate Computer Science student. The capacity claim is
 measurement discipline rather than headcount.
 
 Every quantitative statement here came from a logged command. The container
-was run five times across five commits with identical detection counts and
-identical mAP; in-process metrics were verified against the official
+was run six times with identical detection counts, the last three on the
+shipped configuration with identical mAP; in-process metrics were verified
+against the official
 evaluator to 5.6e-17. Ten configurations were evaluated on the training split
 and recorded in `experiments/CONFIG_LEDGER.md` with commit SHAs. Promotion was
 gated on explicit invariants: container output must match the research
