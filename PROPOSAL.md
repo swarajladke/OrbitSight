@@ -97,6 +97,8 @@ Per-sensor, Arm 2 improves EVK4 0.612170 → 0.770544, DVX 0.121921 → 0.225114
 ### 4.4 Visualisation and outputs
 
 A visualisation tool renders annotated video at all three sensor resolutions with ground-truth and predicted boxes, confidences and track identifiers. Predictions are tab-separated with a header row in the evaluator's field names, one row per detection, `class_id = 0` throughout - the challenge defines a single RSO class and we do not infer a taxonomy we cannot validate.
+<img src="C:/Users/Vicky/Desktop/OrbitSight/OrbitSight_Research/experiments/frames/fig1.png">
+**Figure 1.** EVK4 window, cropped. Green: ground truth. Orange: prediction with confidence and track ID. Rendered by `src/visualize.py`, which ships inside the submitted image.
 
 ## 5. Team Capacity
 
