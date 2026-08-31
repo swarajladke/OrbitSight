@@ -5,24 +5,28 @@ def md_to_html(md_text):
     html_lines = []
     in_table = False
     table_header_done = False
+    pending_indent = False
     
     for line in lines:
         stripped = line.strip()
         
         # Headers
         if stripped.startswith('# '):
+            pending_indent = False
             if in_table:
                 html_lines.append('</tbody></table>')
                 in_table = False
             html_lines.append(f'<h1>{stripped[2:]}</h1>')
             continue
         elif stripped.startswith('## '):
+            pending_indent = False
             if in_table:
                 html_lines.append('</tbody></table>')
                 in_table = False
             html_lines.append(f'<h2>{stripped[3:]}</h2>')
             continue
         elif stripped.startswith('### '):
+            pending_indent = False
             if in_table:
                 html_lines.append('</tbody></table>')
                 in_table = False
@@ -31,6 +35,7 @@ def md_to_html(md_text):
             
         # Tables
         if stripped.startswith('|') and stripped.endswith('|'):
+            pending_indent = False
             cells = [c.strip() for c in stripped[1:-1].split('|')]
             if all(re.match(r'^:?-+:?$', c) for c in cells):
                 table_header_done = True
@@ -56,15 +61,21 @@ def md_to_html(md_text):
                 
         # Empty lines
         if not stripped:
+            pending_indent = True
             continue
             
         # Lists
         if stripped.startswith('- ') or stripped.startswith('• '):
+            pending_indent = False
             html_lines.append(f'<ul><li>{format_inline(stripped[2:])}</li></ul>')
             continue
             
         # Paragraphs
-        html_lines.append(f'<p>{format_inline(line)}</p>')
+        if pending_indent:
+            html_lines.append(f'<p class="pstart">{format_inline(line)}</p>')
+            pending_indent = False
+        else:
+            html_lines.append(f'<p>{format_inline(line)}</p>')
         
     if in_table:
         html_lines.append('</tbody></table>')
@@ -100,6 +111,7 @@ h1 {
     font-weight: 700;
     margin-top: 0pt;
     margin-bottom: 3pt;
+    page-break-after: avoid;
     color: #0b2545;
     line-height: 1.1;
 }
@@ -129,6 +141,9 @@ p {
     text-align: justify;
     line-height: 1.0;
 }
+p.pstart {
+    text-indent: 14pt;
+}
 ul {
     margin-top: 0pt;
     margin-bottom: 4pt;
@@ -147,6 +162,9 @@ table {
     margin-bottom: 4pt;
     font-size: 9.5pt;
     line-height: 1.0;
+}
+tr, td, th {
+    page-break-inside: avoid;
 }
 th, td {
     border: 1px solid #bbb;
@@ -171,6 +189,7 @@ img {
     width: 240pt;
     height: auto;
     display: block;
+    page-break-before: avoid;
     margin-top: 2pt;
     margin-bottom: 2pt;
 }
