@@ -86,7 +86,7 @@ An oracle profiler that substitutes ground-truth box dimensions at fixed ranking
 | Arm | Box sizing | mAP@0.5 | TP | FP | Upgrades | Downgrades |
 |---|---|---|---|---|---|---|
 | 0 | Heuristic extents | 0.165103 | 5,060 | 6,920 | — | — |
-| 1 | Least squares | **0.113964** | 5,554 | 6,426 | 1,581 | 1,087 |
+| 1 | Least squares | 0.113964 | 5,554 | 6,426 | 1,581 | 1,087 |
 | 2 | **Dual log-HGBR (shipped)** | **0.258616** | 6,951 | 5,029 | 2,302 | 411 |
 | — | Oracle (GT dims) | 0.318067 | 8,426 | 3,554 | 3,398 | 32 |
 
