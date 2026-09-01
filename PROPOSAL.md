@@ -1,5 +1,5 @@
 # OrbitSight — Real-Time RSO Detection from Neuromorphic Event Streams
-**TII OrbitSight Challenge · Technical Proposal · Team `orbitsight`**
+**TII OrbitSight Challenge · Technical Proposal · Team `OrbitAI`**
 
 ## 1. Problem Statement and Solution
 
@@ -7,7 +7,7 @@ Neuromorphic vision sensors observing resident space objects produce sparse, asy
 
 OrbitSight is a four-pass event-native pipeline: connected-component candidate proposal on per-window event count maps, a learned candidate scorer over 13 geometric and temporal features, a learned window-level objectness gate over 21 features spanning three consecutive windows, and a post-hoc bounding-box regressor that corrects box dimensions without disturbing detection ranking.
 
-Delivered as a self-contained offline Docker image: it reads `/OrbitSight_dataset`, requires no network, and writes conformant `.txt` predictions plus `Evaluation_Metrics.xlsx` to `/work/orbitsight/DDMMYYYY`. Six end-to-end runs have produced **identical detection counts**, and the three runs of the shipped configuration identical mAP to six decimals.
+Delivered as a self-contained offline Docker image: it reads `/OrbitSight_dataset`, requires no network, and writes conformant `.txt` predictions plus `Evaluation_Metrics.xlsx` to `/work/OrbitAI/DDMMYYYY`. Six end-to-end runs have produced **identical detection counts**, and the three runs of the shipped configuration identical mAP to six decimals.
 
 ## 2. Outcome Metrics
 
@@ -86,7 +86,7 @@ An oracle profiler that substitutes ground-truth box dimensions at fixed ranking
 | Arm | Box sizing | mAP@0.5 | TP | FP | Upgrades | Downgrades |
 |---|---|---|---|---|---|---|
 | 0 | Heuristic extents | 0.165103 | 5,060 | 6,920 | — | — |
-| 1 | Least squares | **0.113964** | 5,554 | 6,426 | 1,581 | 1,087 |
+| 1 | Least squares | 0.113964 | 5,554 | 6,426 | 1,581 | 1,087 |
 | 2 | **Dual log-HGBR (shipped)** | **0.258616** | 6,951 | 5,029 | 2,302 | 411 |
 | — | Oracle (GT dims) | 0.318067 | 8,426 | 3,554 | 3,398 | 32 |
 

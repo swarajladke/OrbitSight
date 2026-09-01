@@ -1,11 +1,11 @@
-# OrbitSight: Neuromorphic Event-Based Satellite & Debris Tracking
+# OrbitAI: Neuromorphic Event-Based Satellite & Debris Tracking
 
 [![Python 3.11](https://img.shields.io/badge/python-3.11-blue.svg)](https://www.python.org/downloads/release/python-3110/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Compute Throughput](https://img.shields.io/badge/Compute_p99-19.15_--_175.99ms-blue.svg)](#real-streaming-latency--real-time-performance)
 [![Scoreboard mAP](https://img.shields.io/badge/mAP%400.5-0.165103-success.svg)](#benchmark-performance)
 
-**OrbitSight** is a high-performance neuromorphic space domain awareness (SDA) pipeline designed to detect and track low-Earth orbit (LEO), medium-Earth orbit (MEO), and geostationary (GEO) satellites and orbital debris using event-based vision sensors (Prophesee EVK4, iniVation DAVIS346, and DVXplorer).
+**OrbitAI** is a high-performance neuromorphic space domain awareness (SDA) pipeline designed to detect and track low-Earth orbit (LEO), medium-Earth orbit (MEO), and geostationary (GEO) satellites and orbital debris using event-based vision sensors (Prophesee EVK4, iniVation DAVIS346, and DVXplorer).
 
 ---
 
@@ -248,8 +248,8 @@ For every candidate bounding box, OrbitSight computes:
 
 ```bash
 # Clone the repository
-git clone https://github.com/swarajladke/OrbitSight.git
-cd OrbitSight
+git clone https://github.com/swarajladke/OrbitAI.git
+cd OrbitAI
 
 # Setup virtual environment
 python -m venv .venv
