@@ -17,10 +17,13 @@ foreach ($p in $doc.Paragraphs) {
     }
 }
 
-# Table formatting, and keep each table whole via KeepWithNext on every
-# paragraph in the table except the last one.
+# Usable text column width, for the fit gate below.
+$textWidth = $doc.PageSetup.PageWidth - $doc.PageSetup.LeftMargin - $doc.PageSetup.RightMargin
+Write-Output "TextWidth = $textWidth"
+
+# Table formatting. Width is forced LAST, after every other table edit, so
+# nothing can undo the autofit.
 foreach ($table in $doc.Tables) {
-    $table.AutoFitBehavior(2)
     foreach ($row in $table.Rows) {
         $row.AllowBreakAcrossPages = 0
     }
@@ -33,6 +36,10 @@ foreach ($table in $doc.Tables) {
         $paras.Item($i).KeepWithNext = $true
     }
     $paras.Item($n).KeepWithNext = $false
+
+    $table.PreferredWidthType = 2
+    $table.PreferredWidth = 100
+    $table.AutoFitBehavior(2)
 }
 
 # Keep each figure with the paragraph that precedes it and with its caption.
@@ -58,10 +65,17 @@ foreach ($s in $doc.InlineShapes) {
 # must be a single row for the answer to mean anything.
 $tableIndex = 1
 foreach ($table in $doc.Tables) {
+    $sum = 0
+    try {
+        foreach ($col in $table.Columns) { $sum += $col.Width }
+    } catch {
+        $sum = -1
+    }
     $firstPage = $table.Rows.Item(1).Range.Information(3)
     $lastPage = $table.Rows.Item($table.Rows.Count).Range.Information(3)
     if ($firstPage -eq $lastPage) { $verdict = "OK" } else { $verdict = "SPLIT" }
-    Write-Output "Table $tableIndex : FirstRowPage = $firstPage, LastRowPage = $lastPage -> $verdict"
+    if ($sum -ge 0 -and $sum -le ($textWidth + 1)) { $fit = "FITS" } else { $fit = "OVERFLOW" }
+    Write-Output "Table $tableIndex : Columns = $($table.Columns.Count), ColumnSum = $sum, FirstRowPage = $firstPage, LastRowPage = $lastPage -> $verdict / $fit"
     $tableIndex++
 }
 
