@@ -3,7 +3,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.patches import FancyBboxPatch
 
-W_PX, H_PX, DPI = 640, 180, 100
+W_PX, H_PX, DPI = 640, 140, 100
 
 fig = plt.figure(figsize=(W_PX / DPI, H_PX / DPI), dpi=DPI)
 ax = fig.add_axes([0, 0, 1, 1])
@@ -26,11 +26,11 @@ left, right = 12.0, 628.0
 gap = 14.0
 n = len(stages)
 bw = (right - left - gap * (n - 1)) / n
-by, bh = 52.0, 88.0
+by, bh = 36.0, 78.0
 
-ax.text(left, 168, "Input: 40 ms event window  (EVK4 1280x720 / DVX 640x480 / DAVIS 346x260)",
+ax.text(left, 130, "Input: 40 ms event window  (EVK4 1280x720 / DVX 640x480 / DAVIS 346x260)",
         fontsize=6.0, va="center", ha="left", color="#133c55")
-ax.text(right, 168, "Output: <sequence>.txt + Evaluation_Metrics.xlsx",
+ax.text(right, 130, "Output: <sequence>.txt + Evaluation_Metrics.xlsx",
         fontsize=6.0, va="center", ha="right", color="#133c55")
 
 for i, (title, detail) in enumerate(stages):
@@ -48,7 +48,7 @@ for i, (title, detail) in enumerate(stages):
                     xytext=(x + bw + 2, by + bh / 2),
                     arrowprops=dict(arrowstyle="-|>", linewidth=0.9, color="#205072"))
 
-ax.text(W_PX / 2, 26,
+ax.text(W_PX / 2, 15,
         "CPU-only, offline  |  three gradient-boosted tree models, 1.5 MB total  |  "
         "compute p99 < 40 ms on 18 of 21 sequences  |  RSS 114.3-130.7 MB",
         fontsize=6.0, ha="center", va="center", color="#133c55")
