@@ -1,303 +1,325 @@
-# OrbitAI: Neuromorphic Event-Based Satellite & Debris Tracking
+# OrbitSight — Neuromorphic Event-Based RSO Detection and Tracking
 
 [![Python 3.11](https://img.shields.io/badge/python-3.11-blue.svg)](https://www.python.org/downloads/release/python-3110/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Compute Throughput](https://img.shields.io/badge/Compute_p99-19.15_--_175.99ms-blue.svg)](#real-streaming-latency--real-time-performance)
-[![Scoreboard mAP](https://img.shields.io/badge/mAP%400.5-0.165103-success.svg)](#benchmark-performance)
+[![mAP@0.5](https://img.shields.io/badge/mAP%400.5%20all--21-0.284406-success.svg)](#benchmark-performance)
+[![Compute p99](https://img.shields.io/badge/compute%20p99%20%3C%2040%20ms-18%20of%2021-blue.svg)](#real-time-performance)
+[![CPU only](https://img.shields.io/badge/CPU--only-no%20GPU%2C%20no%20network-informational.svg)](#docker-submission-container)
 
-**OrbitAI** is a high-performance neuromorphic space domain awareness (SDA) pipeline designed to detect and track low-Earth orbit (LEO), medium-Earth orbit (MEO), and geostationary (GEO) satellites and orbital debris using event-based vision sensors (Prophesee EVK4, iniVation DAVIS346, and DVXplorer).
+**OrbitSight** detects and tracks resident space objects (RSOs) — satellites and orbital debris in LEO, MEO and GEO — in neuromorphic event-camera recordings from the Abu Dhabi Quantum Optical Ground Station's 0.8 m telescope. It runs on CPU, fully offline, with no neural network.
 
----
+> **Naming.** The system is **OrbitSight**. This repository is named `OrbitAI` because that is the registered team name for the TII OrbitSight Challenge. Both names refer to the same artifact.
 
-## 🌌 The Challenge: Neuromorphic Space Domain Awareness (SDA)
-
-Space Domain Awareness (SDA) is critical for spaceflight safety, collision avoidance, and orbital debris management. Traditional frame-based optical telescopes suffer from motion blur, dynamic range saturation (streaking from stellar backgrounds), high power draw, and blind spots during high-speed satellite transits.
-
-**Event cameras (neuromorphic sensors)** solve this by measuring per-pixel asynchronous brightness changes at microsecond resolution with dynamic ranges $>120\text{ dB}$. However, processing event streams for space surveillance introduces severe algorithmic hurdles:
-1. **Extreme Background Clutter**: Atmospheric turbulence, hot pixels, and optical starfields generate massive amounts of non-target event noise.
-2. **High Target Velocity Variations**: Satellite angular velocities range from sub-pixel drift to tens of pixels per millisecond across diverse sensor fields of view.
-3. **Severe Multi-Sensor Heterogeneity**: Large disparities in sensor spatial resolution ($346\times 260$ to $1280\times 720$), sensitivity, and background noise profiles.
-4. **Streaming Throughput & Latency Budgets**: Compute processing time per window must fit within the streaming arrival rate without unbounded memory caching or buffering.
+Submitted as a self-contained Docker image for the **TII OrbitSight Challenge** (Technology Innovation Institute, Propulsion and Space Research Center, Abu Dhabi).
 
 ---
 
-## 🎯 Technical Requirements & Competition Constraints
+## Headline results
 
-| Constraint / Requirement | Specification | Enforcement / Verification |
-|---|---|---|
-| **Temporal Windowing** | Fixed $\Delta t = 40,000\ \mu\text{s}$ ($40\text{ ms}$) non-overlapping slicing windows | `iter_windows(events, window_us=40000)` strictly uses timestamp column `3` |
-| **Streaming Compute Throughput** | Target $< 40.0\text{ ms}$ compute execution time per window | Measured compute p50: **8.98 – 52.08 ms**, compute p99: **19.15 – 175.99 ms** (5 pass stably, 1 unstable) |
-| **Algorithmic Lookahead** | Disclosed 1-window ($40.0\text{ ms}$) future lookahead buffer ($t+1$) | Delivers $+92.2\%$ relative mAP gain on sparse tracks vs causal mode |
-| **Primary Metric** | Mean Average Precision at $\text{IoU} \ge 0.5$ ($\text{mAP}@0.5$) | Evaluated via authoritative single-source `src.metrics.iou` |
-| **Secondary Metrics** | Precision, Recall, $\text{F}_1$-score, False Positives count | Tracked across all training sequences in `src.scoreboard` |
-| **Sensor Generalization** | EVK4 ($1280\times 720$), DVXplorer ($640\times 480$), DAVIS346 ($346\times 260$) | Adaptive per-sensor morphology & continuous spatial activity maps |
-| **Prediction Format** | 9 tab-separated fields with timestamps, bounding box, class, and confidence | `sequence_id`, `window_start_timestamp_us`, `window_end_timestamp_us`, `center_x`, `center_y`, `width`, `height`, `class_id`, `confidence` |
-| **Container Contract** | Linux Docker container consuming `/OrbitSight_dataset` and writing `/work/<TEAM>/<DATE>` | Fully offline (`--network none`), headless OpenCV and shipping `.joblib` models |
-| **Zero Test Contamination** | 17 Training sequences for tuning; 4 Test sequences held out (evaluated 3x for ranking checks) | Strict closed-scope protocol governed by `AGENTS.md` |
+Produced by the submitted container running offline across all 21 dataset sequences, and independently verified against the challenge's own `evaluate.py`.
 
----
+| Split | mAP@0.5 | Precision | Recall | F1 | TP | FP | FN |
+|---|---|---|---|---|---|---|---|
+| **All 21 sequences** | **0.284406** | 0.623120 | 0.472327 | 0.537345 | 10,565 | 6,390 | 11,803 |
+| Train (17, used for selection) | 0.258616 | 0.580217 | 0.454551 | 0.509754 | 6,951 | 5,029 | 8,341 |
+| **Test (4, derived by subtraction)** | **0.394014** | 0.726432 | 0.510740 | 0.599784 | 3,614 | 1,361 | 3,462 |
 
-## 📈 Research & Development Progress
+Test-split figures are derived by subtracting the train-17 aggregate from the all-21 aggregate. The four test sequences were never used to select a configuration.
 
-```
-[Phase 1: Pre-Geometry Baseline] ────► [Phase 2: Continuous Static Map] ────► [Phase 3: Learned Candidate Scorer]
-      mAP: 0.155493                          Suppresses 0-97 px (0.00-0.04%)       Train ROC-AUC: 0.9984
-      FP:  13,146                            1 GT box lost in 2/21 seqs            Val ROC-AUC:   0.9300
-                                                    │
-                                                    ▼
-[Phase 5: Streaming Optimization] ◄─── [Phase 4: Two-Stage Objectness Gating]
-      Vectorized Component Binning           mAP: 0.165103 (+6.2% vs Baseline)
-      5 Stably Passing Sequences             F1:  0.371077 (+21.2% vs Baseline)
-      Causal Ablation Disclosed              FP:  6,920 (-47.4% FPs vs Baseline)
-```
-
-### Phase 1: Pre-Geometry Baseline Pipeline
-- Established reference pipeline operating point with sensor-tailored boxes and candidate classifier (`conf_min = 0.30, max_candidates_per_window = 1`), achieving **0.155493 mAP** and **13,146 false positives**.
-
-### Phase 2: Continuous Background Activity Suppression & Sensor Specialization
-- Built `src/static_map.py` to accumulate continuous pixel event frequencies over sequence timelines. Thresholding at `static_thresh: 0.5` suppresses 0–97 hot pixels ($0.00–0.04\%$ of sensor frame area), with exactly 1 GT box suppressed in each of 2 out of 21 total sequences.
-- Calibrated sensor-specific morphology: fixed bounding boxes for EVK4 ($52\times 56$) and DVX ($18\times 18$), and dynamic extent-padded boxes for DAVIS ($10\times 12$).
-
-### Phase 3: Learned Motion & Spatial Re-Scorer
-- Extracted $944,504$ candidate samples ($6,977$ positives, $937,527$ negatives) across the 17 training sequences.
-- Engineered 13 physical, kinematic, and background features. Fit a `HistGradientBoostingClassifier` achieving **0.9984 Train ROC-AUC** and **0.9300 Validation ROC-AUC** (`models/scorer_pregeom.joblib`).
-
-### Phase 4: Two-Stage Temporal Window Objectness Gating
-- Trained a sequence-level window objectness classifier on 21-D temporal window statistics (`models/scorer_objectness_pre_geometry.joblib`).
-- Gating candidate scores by window objectness probability: `g_conf = score * p_obj` with threshold `0.30`.
-- **mAP increased to `0.165103` (+6.2% relative gain over baseline)**, **F1 surged to `0.371077` (+21.2% gain)**, and **false alarms plunged from 13,146 down to 6,920** (47.4% false alarm reduction).
-
-### Phase 5: Streaming Pipeline Optimization & Real-Time Profiling
-- Replaced iterative component loops with vectorized `np.bincount` event summation and active candidate budget sorting (`max_components_per_window: 64`). The 64-component budget is an active tuned parameter providing a $+0.001481$ mAP gain ($0.163622 \rightarrow 0.165103$) by suppressing low-density noise artifacts from displacing high-confidence true detections.
-- Evaluated empirical component ranks via `src/component_rank.py` across all 15,292 ground-truth windows (5,647 matched $\ge$ 5,060 pipeline TPs; overall $p_{50}=1.0, p_{95}=3.0, p_{99}=6.0, \max=32$). Candidate generation degrades under dense clutter on DAVIS only ($35.7\% \rightarrow 11.9\%$ any-match; $121/1019$ windows, correcting the pre-`ac10e04` preliminary artifact of $2/1672$), while EVK4 is unaffected ($84.6\% \rightarrow 84.3\%$) and DVX shows no degradation ($25.4\% \rightarrow 33.8\%$). Budget truncation is not implicated: zero windows exceed rank 64 on any sensor ($\max=32$).
-- Profiled full per-window streaming latency across 3 independent runs without synthetic amortization constants.
+**Verification.** Precision, recall, F1 and the TP/FP/FN counts match `evaluate.py` exactly at absolute difference 0. mAP matches to **5.55e-17**, the limit of double-precision representation.
 
 ---
 
-## 📊 Benchmark Performance
+## The problem
 
-Authoritative scoreboard evaluation across the **17 Training Sequences** (15,292 ground-truth bounding box instances):
+Space Domain Awareness requires detecting faint, fast-moving objects against star fields. Frame-based telescopes suffer motion blur, dynamic-range saturation and blind spots during high-speed transits. Event cameras measure per-pixel asynchronous brightness changes at microsecond resolution with >120 dB dynamic range — but processing their output for space surveillance is hard for four reasons:
 
-| Pipeline Configuration | Scorer Mode | Operating Point (`conf_min`, `top_k`) | mAP@0.5 | Precision | Recall | F1 Score | TP | FP | FN |
-|---|---|---|---|---|---|---|---|---|---|
-| **Baseline Heuristic** | Weighted | `0.05`, `k=2` | 0.101145 | 0.029947 | **0.348614** | 0.055156 | 5,331 | 172,683 | 9,961 |
-| **Learned Baseline** | Learned | `0.30`, `k=1` | 0.155493 | 0.281011 | 0.335993 | 0.306052 | **5,138** | 13,146 | 10,154 |
-| **OrbitSight Final (Locked)** | **Learned + Objectness** | **`0.30`, `k=1`** | **0.165103** | **0.422371** | **0.330892** | **0.371077** | **5,060** | **6,920** | **10,232** |
+1. **Extreme background clutter.** Atmospheric turbulence, hot pixels and starfields generate enormous non-target event volume.
+2. **Wide target velocity range.** Angular velocities span sub-pixel drift to tens of pixels per millisecond.
+3. **Sensor heterogeneity.** Spatial resolution ranges from 346×260 to 1280×720, with different sensitivity and noise profiles.
+4. **Streaming latency budget.** Per-window compute must fit inside the window arrival rate without unbounded buffering.
 
-### Per-Sequence AP@0.5 Breakdown across All 17 Training Sequences
-
-| Target Sequence Name | Track Type | Sensor | Ground Truth Instances | OrbitSight Final AP@0.5 |
-|---|---|---|---|---|
-| `2025_12_23_21_12_28_EVK4_mag5.2` | Dense ($>43$) | EVK4 | 1,203 | **0.6122** |
-| `DAVIS_COSMOS1933_18958_2024-12-04-18-37-01` | Sparse ($\le 43$) | DAVIS | 43 | **0.0853** |
-| `DAVIS_EGS_16908_2024-11-01-19-10-44` | Dense ($>43$) | DAVIS | 3,140 | **0.3447** |
-| `DAVIS_Filtered_NOAA6_11416_2025-01-13-19-51-06` | Dense ($>43$) | DAVIS | 1,158 | **0.0181** |
-| `DAVIS_RESURSDK1_29228_2024-12-04-18-37-01` | Sparse ($\le 43$) | DAVIS | 23 | **0.1348** |
-| `DAVIS_SL12RB2_15772_2024-12-04-18-21-37` | Sparse ($\le 43$) | DAVIS | 8 | **0.1250** |
-| `DAVIS_SL16RB_20625_2024-12-04-19-34-18` | Dense ($>43$) | DAVIS | 197 | **0.1824** |
-| `DAVIS_SL16RB_26070_2024-12-04-19-14-39` | Sparse ($\le 43$) | DAVIS | 10 | **0.0900** |
-| `DAVIS_SL8RB_2025-01-13-19-15-36` | Dense ($>43$) | DAVIS | 5,605 | **0.2390** |
-| `DVX_Filtered_ACS3_59588_2025-01-20-19-35-44` | Sparse ($\le 43$) | DVX | 12 | **0.0750** |
-| `DVX_Filtered_BlockDM_SLRB_32405_2025-01-20-19-57-17` | Dense ($>43$) | DVX | 478 | **0.2181** |
-| `DVX_Filtered_NOAA15_25338_2025-01-20-19-25-07` | Sparse ($\le 43$) | DVX | 26 | **0.0909** |
-| `DVX_Filtered_NOAA16_26536_2025-01-20-19-46-50` | Sparse ($\le 43$) | DVX | 34 | **0.0882** |
-| `DVX_Filtered_NOAA6_11416_2025-01-20-19-11-35` | Sparse ($\le 43$) | DVX | 14 | **0.0714** |
-| `DVX_Filtered_Stars2_2025-01-20-19-57-17` | Sparse ($\le 43$) | DVX | 9 | **0.2037** |
-| `DVX_Filtered_Stars_2025-01-20-19-15-10` | Dense ($>43$) | DVX | 3,326 | **0.1863** |
-| `DVX_NOAA6_11416_2025-01-20-19-06-31` | Sparse ($\le 43$) | DVX | 6 | **0.0417** |
+The core difficulty is not classification capacity. It is **ranking a very small number of true detections above a very large number of plausible noise components**, under a strict IoU ≥ 0.5 requirement, in real time, on CPU.
 
 ---
 
-## ⏱️ Real Streaming Latency & Throughput Performance
+## Architecture
 
-OrbitSight operates as a sliding 3-window streaming buffer ($t-1, t, t+1$).
+![OrbitSight pipeline](experiments/frames/fig2_pipeline.png)
 
-- **Compute Throughput Budget**: Compute latency per window must fit within the $40.0\text{ ms}$ temporal arrival rate to prevent queue backlog.
-- **Algorithmic Lookahead Latency**: Fixed **$40.0\text{ ms}$** algorithmic lookahead due to 1 future buffer window ($t+1$).
-- **Streaming Status**: **5 sequences pass stably** ($p_{99} < 40\text{ ms}$); **1 sequence is within measurement noise** (`DAVIS_Filtered_NOAA6`: $38.95 \pm 13.9\text{ ms}$, marked UNSTABLE); **11 sequences exceed $40\text{ ms}$ compute $p_{99}$** during heavy event bursts ($>10\text{M}$ events/sequence or starfield clutter).
+Four passes over each 40 ms event window:
 
-### Measured Per-Sequence Compute Latency Table (3 Independent Runs)
+**Pass 1 — proposal.** Events are accumulated into a 2D count map. Adaptive percentile thresholding escalates with window density (capped at 99.0) so bright frames do not flood the component stage. `cv2.connectedComponentsWithStats` yields components, ranked by event count and truncated at 64 per window; oversized components are re-thresholded and split. A continuous static-source map — the fraction of windows in which each pixel is active — suppresses stars and hot pixels.
 
-| Sequence Name | Windows | Compute p50 (ms) | Compute p95 (ms) | Compute p99 (ms) | Compute Max (ms) | Throughput ($p_{99} < 40\text{ms}$) |
-|---|---|---|---|---|---|---|
-| `2025_12_23_21_12_28_EVK4_mag5.2` | 2,060 | $52.08 \pm 5.2$ | $98.97 \pm 7.3$ | $175.99 \pm 50.2$ | $555.93 \pm 250.1$ | Over Budget (High Res $1280\times 720$) |
-| `DAVIS_COSMOS1933_18958` | 7,664 | $16.57 \pm 0.5$ | $31.23 \pm 3.4$ | $58.45 \pm 10.5$ | $747.53 \pm 215.6$ | Over Budget (Burst Event Noise) |
-| `DAVIS_EGS_16908` | 10,682 | $17.67 \pm 3.2$ | $47.93 \pm 31.5$ | $117.91 \pm 106.5$ | $545.24 \pm 281.0$ | Over Budget (Dense Cluster Spikes) |
-| `DAVIS_Filtered_NOAA6_11416` | 3,801 | $10.34 \pm 0.6$ | $20.44 \pm 2.9$ | $38.95 \pm 13.9$ | $226.78 \pm 149.8$ | **UNSTABLE ($\sigma > 25\%$)** |
-| `DAVIS_RESURSDK1_29228` | 6,866 | $16.96 \pm 2.4$ | $29.64 \pm 0.6$ | $40.03 \pm 1.7$ | $450.73 \pm 228.7$ | Over Budget ($40.03\text{ ms}$) |
-| `DAVIS_SL12RB2_15772` | 1,674 | $11.82 \pm 0.1$ | $24.97 \pm 0.3$ | $28.72 \pm 0.2$ | $58.12 \pm 37.8$ | **PASS (<40 ms)** |
-| `DAVIS_SL16RB_20625` | 7,078 | $11.37 \pm 0.1$ | $24.90 \pm 0.2$ | $28.58 \pm 0.1$ | $139.07 \pm 69.6$ | **PASS (<40 ms)** |
-| `DAVIS_SL16RB_26070` | 1,483 | $11.75 \pm 0.2$ | $25.33 \pm 0.2$ | $29.38 \pm 0.2$ | $31.67 \pm 0.2$ | **PASS (<40 ms)** |
-| `DAVIS_SL8RB_2025-01-13` | 7,603 | $8.98 \pm 0.1$ | $16.81 \pm 0.1$ | $19.15 \pm 1.7$ | $184.72 \pm 220.6$ | **PASS (<40 ms)** |
-| `DVX_Filtered_ACS3_59588` | 10,774 | $19.63 \pm 2.5$ | $37.31 \pm 11.6$ | $79.41 \pm 67.3$ | $352.10 \pm 249.5$ | Over Budget (High Event Variance) |
-| `DVX_Filtered_BlockDM_SLRB_32405` | 2,470 | $18.04 \pm 0.1$ | $29.18 \pm 0.2$ | $31.17 \pm 0.1$ | $97.94 \pm 74.1$ | **PASS (<40 ms)** |
-| `DVX_Filtered_NOAA15_25338` | 11,336 | $20.77 \pm 3.7$ | $33.56 \pm 5.7$ | $48.62 \pm 19.6$ | $618.03 \pm 301.0$ | Over Budget (Background Activity) |
-| `DVX_Filtered_NOAA16_26536` | 11,226 | $32.56 \pm 0.1$ | $40.13 \pm 0.2$ | $50.96 \pm 1.3$ | $549.74 \pm 126.6$ | Over Budget (Persistent Clutter) |
-| `DVX_Filtered_NOAA6_11416` | 3,245 | $32.32 \pm 0.1$ | $39.45 \pm 0.7$ | $48.49 \pm 2.1$ | $238.91 \pm 159.1$ | Over Budget (Background Activity) |
-| `DVX_Filtered_Stars2_2025-01-20` | 191 | $32.18 \pm 0.1$ | $36.74 \pm 0.2$ | $41.92 \pm 1.4$ | $45.77 \pm 3.7$ | Over Budget ($41.92\text{ ms}$) |
-| `DVX_Filtered_Stars_2025-01-20` | 12,077 | $25.30 \pm 4.8$ | $39.67 \pm 4.6$ | $73.76 \pm 16.7$ | $755.49 \pm 49.7$ | Over Budget (Starfield Clutter) |
-| `DVX_NOAA6_11416_2025-01-20` | 5,618 | $27.69 \pm 1.7$ | $48.59 \pm 2.9$ | $69.28 \pm 13.2$ | $339.46 \pm 127.9$ | Over Budget (22M Raw Events) |
+**Pass 2 — candidate scoring.** Candidates are matched to the previous and next windows by centroid distance to produce a persistence count; single-window candidates are dropped. Thirteen features per candidate feed a `HistGradientBoostingClassifier` trained on **944,504 candidates** (6,977 positives, 937,527 negatives), validation **ROC-AUC 0.930**.
 
----
+**Pass 3 — window objectness.** A 21-dimensional feature vector spanning the previous, current and next windows drives a second classifier estimating whether a window contains a real object at all. Candidate confidence is multiplied by this probability. Validation **ROC-AUC 0.889**, **PR-AUC 0.921** against a 0.60 trivial baseline — a 1.53× lift on the validation positive rate.
 
-## 🔬 Causal-Variant Ablation Analysis
-
-To quantify the value of the 1-window lookahead ($40.0\text{ ms}$ algorithmic latency), a strictly causal variant of OrbitSight was ablated and evaluated across all 17 training sequences with all forward-lookahead features zeroed ($t+1$ displacement, forward speed, and future window objectness statistics):
-
-| Metric | Pre-76c3e2a Reference Config (mc=2000) | Causal Variant (Zero Lookahead) | Absolute $\Delta$ |
-|---|---|---|---|
-| **Overall Train mAP** | **0.163628** | 0.137223 | **-0.026405 (-16.1%)** |
-| **Sparse Track mAP** ($\le 43\text{ GT}$) | **0.098205** | 0.051086 | **-0.047119 (-48.0%)** |
-| **Dense Track mAP** ($> 43\text{ GT}$) | 0.257091 | **0.260275** | +0.003184 (+1.2%) |
-| **Precision** | **0.422441** | 0.416869 | -0.005572 |
-| **Recall** | 0.330892 | **0.337431** | +0.006539 |
-| **F1 Score** | 0.371104 | **0.372967** | +0.001863 |
-| **True Positives (TP)** | 5,060 | **5,160** | +100 |
-| **False Positives (FP)** | **6,918** | 7,218 | +300 |
-| **False Negatives (FN)** | 10,232 | **10,132** | -100 |
-
-*Note: Ablation deltas are measured against this reference; the shipped configuration measures 0.165103. Relative deltas (-16.1% overall, +92.2% sparse) are unaffected.*
-
-**Finding**: Removing the 1-window lookahead costs **$48.0\%$ of sparse track mAP** (equivalently, the 1-window lookahead delivers **$+92.2\%$ relative mAP gain on sparse sequences**, increasing sparse mAP from $0.051086$ to $0.098205$). On dense sequences, causal tracking maintains accuracy due to continuous target signal.
-
----
-
-## 🏗️ System Architecture
+**Pass 4 — emission and box regression.** Per-window NMS, confidence floor, top-K selection, then a dual `HistGradientBoostingRegressor` predicting log-width and log-height, then exponentiation and per-sensor clamping.
 
 ```mermaid
 flowchart TD
-    A["Raw Events Stream (.npy)<br/>[x, y, p, t_us, label, rel_t_us]"] --> B["Window Slicer (40,000 µs)"]
+    A["Raw Events (.npy)<br/>[x, y, p, t_us, label, rel_t_us]"] --> B["Window Slicer (40,000 us)"]
     B --> C["Continuous Static Activity Map"]
     C --> D["Static Mask Suppression (static_thresh=0.5)"]
     B --> E["2D Event Count Accumulator"]
     E --> D
     D --> F["Sensor-Adaptive Morphology & Percentile Thresholding"]
-    F --> G["Connected Component Extraction & Bounding Boxes"]
-    G --> H["Temporal Neighbor Association (t - Δt, t + Δt)"]
-    H --> I["Vectorized 13-D Candidate Feature Extraction"]
-    I --> J["Stage 1: Candidate Classifier (scorer_pregeom.joblib)"]
-    B --> W["Window Temporal Summary (21-D Features)"]
-    W --> OG["Stage 2: Window Objectness Gate (scorer_objectness.joblib)"]
-    J --> GATE["Gated Score Fusion: conf = p_cand * p_obj"]
+    F --> G["Connected Components (max 64/window)"]
+    G --> H["Temporal Association (t-1, t, t+1)"]
+    H --> I["13-D Candidate Features"]
+    I --> J["Pass 2: Candidate Classifier<br/>scorer_pregeom.joblib"]
+    B --> W["21-D Window Summary"]
+    W --> OG["Pass 3: Window Objectness Gate<br/>scorer_objectness_pre_geometry.joblib"]
+    J --> GATE["Gated Fusion: conf = p_cand * p_obj"]
     OG --> GATE
-    GATE --> K["Top-K Filtering (k=1) & Confidence Floor (0.30)"]
-    K --> L["Final Predictions TSV Files"]
+    GATE --> K["NMS, Confidence Floor 0.30, Top-K (k=1)"]
+    K --> R["Pass 4: Dual log-HGBR Box Regressor<br/>box_regressor_arm2.joblib"]
+    R --> L["Predictions TSV + Evaluation_Metrics.xlsx"]
 ```
 
-### 13-Dimensional Feature Representation
-For every candidate bounding box, OrbitSight computes:
-1. `events`: Total event count enclosed within the bounding box.
-2. `density`: Local event density ($\text{events} / \text{area}$).
-3. `area`: Bounding box pixel footprint ($w \times h$).
-4. `extent_w`: Bounding box width.
-5. `extent_h`: Bounding box height.
-6. `aspect`: Geometric aspect ratio $\max(w, h) / \max(\min(w, h), 1.0)$.
-7. `hits`: Temporal persistence count across adjacent windows ($1, 2, 3$).
-8. `disp_prev`: Distance to nearest candidate in preceding window ($t - \Delta t$).
-9. `disp_next`: Distance to nearest candidate in succeeding window ($t + \Delta t$).
-10. `speed`: Mean candidate displacement $\frac{1}{2}(\text{disp\_prev} + \text{disp\_next})$.
-11. `dir_consistency`: Cosine similarity between trajectory vectors $\cos(\vec{v}_{\text{prev}}, \vec{v}_{\text{next}})$.
-12. `static_frac`: Normalized background activity frequency at box centroid.
-13. `local_bg`: Background event density in a 4-pixel dilated halo surrounding the box.
+### Why no neural network
+
+Three gradient-boosted tree models totalling **1,496,897 bytes** (~1.5 MB) with eight pinned dependencies, no GPU and no network. Cold start is sub-second. On the stated evaluation hardware — Intel i9-12900H, 32 GB RAM, Ubuntu, CPU-only, offline — this is a deployable configuration rather than a research prototype awaiting accelerators.
+
+### The central design decision
+
+An earlier attempt optimised box geometry **upstream**, before scoring. Training labels for both classifiers are assigned by `IoU >= 0.5` computed *using the configured box size*, so changing box geometry changes which candidates are labelled positive. Recall rose and mAP fell: `0.155493` → `0.146340`.
+
+The shipped design applies regression **after** ranking is finalised. Centroids, timestamps, confidences and rank order are preserved bit-for-bit; only width and height change. This is verifiable rather than asserted: **total detections are invariant at 16,955** before and after regression, so the regressor cannot have altered any ranking decision.
 
 ---
 
-## 📁 Repository Structure
+## Benchmark performance
 
-```
-├── config.yaml               # Master pipeline configuration (per-sensor parameters)
-├── Dockerfile                # Self-contained offline submission container definition
-├── run.sh                    # Container automated execution script
-├── requirements.txt          # Pinned runtime dependencies
-├── AGENTS.md                 # Operating protocol & validation rules
-├── models/
-│   ├── scorer_pregeom.joblib                   # Stage 1: Candidate Classifier model
-│   ├── scorer_objectness_pre_geometry.joblib   # Stage 2: Temporal Window Objectness Gate
-│   └── model_structure.json                    # Model metadata and hyperparameter schemas
-└── src/
-    ├── common.py             # Event I/O, resolution inference, window slicing
-    ├── detector.py           # Morphology, percentile filtering, connected components
-    ├── static_map.py         # Continuous background activity map generation
-    ├── nms.py                # IoU-based bounding box non-maximum suppression
-    ├── features.py           # Vectorized 13-D candidate feature extraction
-    ├── tracker.py            # Multi-window track association & ID maintenance
-    ├── pipeline.py           # Real-time stream processing engine
-    ├── infer.py              # Batch dataset CLI inference & latency logging
-    ├── scoreboard.py         # Authoritative mAP@0.5 evaluation suite
-    ├── metrics.py            # Canonical IoU and precision-recall metrics
-    ├── make_report.py        # Submission Excel metrics compiler
-    ├── report_xlsx.py        # Formatted XLSX report writer
-    ├── validate_predictions.py# Prediction syntax and schema validator
-    ├── latency_bench.py      # Real streaming per-window latency benchmark
-    ├── component_rank.py     # Connected component rank profiling tool
-    ├── visualize.py          # Headless event stream & bounding box video renderer
-    ├── train_scorer.py       # Candidate classifier training & evaluation
-    ├── train_reranker.py     # Track association model training
-    ├── gt_occupancy.py       # Ground truth window occupancy profiler
-    ├── oracle_recall.py      # Multi-stage upper-bound recall profiler
-    ├── ablation_causal.py    # Causal streaming ablation evaluation suite
-    ├── filter_preds.py       # Post-hoc confidence and Top-K filter utility
-    └── sweep.py              # Detector parameter sweep engine
-```
+### Box-sizing ablation (17 training sequences)
 
----
+An oracle profiler substituting ground-truth box dimensions at fixed ranking established the achievable headroom before any model was built.
 
-## 🚀 Quick Start
+| Arm | Box sizing | mAP@0.5 | TP | FP | Upgrades | Downgrades |
+|---|---|---|---|---|---|---|
+| 0 | Heuristic extents (control) | 0.165103 | 5,060 | 6,920 | — | — |
+| 1 | Least squares | 0.113964 | 5,554 | 6,426 | 1,581 | 1,087 |
+| **2** | **Dual log-HGBR (shipped)** | **0.258616** | 6,951 | 5,029 | 2,302 | 411 |
+| — | Oracle (ground-truth dimensions) | 0.318067 | 8,426 | 3,554 | 3,398 | 32 |
 
-### 1. Environment Setup
+Arm 2 captures **61.1%** of the available oracle gap, a **+49.1%** improvement in all-21 mAP over the pre-regressor configuration (`0.190765`).
+
+**Arm 1 is retained as a published negative result.** It raised precision, recall and F1 yet *reduced* mAP: shrinking boxes toward correct average dimensions without correcting centroid offset pushed 1,087 detections from IoU 0.50–0.55 down to 0.40–0.49, and those losses fell on higher-ranked detections than the gains. Rank-weighted metrics penalise this; count-based metrics do not.
+
+Validation MAE in log-pixel space is 0.284 (width) and 0.297 (height) — 2.41 / 2.67 px on DAVIS.
+
+### Per-sensor effect of box regression
+
+| Sensor | Resolution | mAP before | mAP after | Change |
+|---|---|---|---|---|
+| EVK4 | 1280×720 | 0.612170 | 0.770544 | +25.9% |
+| DVXplorer | 640×480 | 0.121921 | 0.225114 | +84.6% |
+| DAVIS346 | 346×260 | 0.152401 | 0.228126 | +49.7% |
+
+The EVK4 regressor head had **no validation sequences in the holdout**. That makes the EVK4 figure the least independently supported number in this repository, and it is stated here rather than omitted.
+
+### Generalisation
+
+The regressor converts false positives into true positives at nearly identical rates on data it was selected on and data it was not:
+
+- Training split: 1,891 of 11,980 detections converted — **15.8%**
+- Test split: 797 of 4,975 detections converted — **16.0%**
+- Net: **+2,688 true positives** at a constant 16,955 total detections
+
+The gain is largest where the baseline was weakest. On the ten sparse sequences (≤43 ground-truth boxes) mAP rises `0.100600` → `0.226600` (**+125.2%**); on the seven dense sequences `0.257257` → `0.304353` (+18.3%). These reconcile to the reported training mAP: (10 × 0.226600 + 7 × 0.304353) / 17 = **0.258616**.
+
+### Regenerating per-sequence breakdowns
+
+Per-sequence AP@0.5 and per-sequence latency tables are not reproduced here because they change with every configuration. Regenerate them from the shipped configuration:
 
 ```bash
-# Clone the repository
+python -m src.scoreboard --split train --pred-dir predictions --tag current
+python -m src.latency_bench --dataset-dir ../OrbitSight_Dataset/Training_sets --config config.yaml --reps 5 --warmup-windows 20
+```
+
+---
+
+## Real-time performance
+
+Measured with a dedicated streaming benchmark timing the **full** per-window pipeline — proposal, feature extraction, both classifiers, NMS, confidence gating, top-K and box regression — over five independent repetitions, excluding 20 warmup windows per sequence.
+
+| Compute p99 per window | Sequences |
+|---|---|
+| < 40 ms | **18 of 21** (nominal) |
+| < 40 ms, excluding runs with σ > 25% of mean | **17 of 21** |
+| < 40 ms, training split | **15 of 17**, up from 6 of 17 |
+
+Best case is **14.99 ± 0.1 ms** (`DAVIS_Filtered_NOAA6`). Three sequences exceed the budget:
+
+| Sequence | Compute p99 | Cause |
+|---|---|---|
+| `DVX_NOAA6_11416` | 84.67 ms | Densest stream, 22M raw events |
+| `EVK4_mag7.3` | 77.76 ms | Highest resolution; worst case in every measurement taken |
+| `EVK4_mag5.2` | 58.73 ms | Highest resolution |
+
+**Disclosure.** The 6-of-17 → 15-of-17 improvement is attributable to replacing a per-window-materialising static-source map with a constant-memory accumulator — **not** to the box regressor, whose marginal cost is two vectorised `predict()` calls per sequence. Total container wall clock is 48.08 min (2,885.18 s), higher than the 23.26 min baseline: the constant-memory map trades total throughput for bounded memory and improved tail latency. Since the challenge scores per-window latency and imposes no wall-clock limit, we consider this the correct trade.
+
+**Latency semantics.** With one window of lookahead, end-to-end latency is one 40 ms window period plus compute. We report compute p99 because it determines whether the system keeps pace with the sensor; the window period is inherent to the formulation.
+
+**Run invariants.** 143,750 windows processed, 16,955 predictions emitted, 22,368 ground-truth boxes, resident memory 114.3–130.7 MB across all 21 sequences.
+
+---
+
+## Causal-variant ablation
+
+To quantify the value of the disclosed 1-window lookahead, a strictly causal variant was evaluated across all 17 training sequences with every forward-looking feature zeroed (`t+1` displacement, forward speed, future window objectness).
+
+| Metric | Reference config (mc=2000) | Causal variant | Δ |
+|---|---|---|---|
+| Overall train mAP | 0.163628 | 0.137223 | **−0.026405 (−16.1%)** |
+| Sparse track mAP (≤43 GT) | 0.098205 | 0.051086 | **−0.047119 (−48.0%)** |
+| Dense track mAP (>43 GT) | 0.257091 | 0.260275 | +0.003184 (+1.2%) |
+| Precision | 0.422441 | 0.416869 | −0.005572 |
+| Recall | 0.330892 | 0.337431 | +0.006539 |
+| F1 | 0.371104 | 0.372967 | +0.001863 |
+
+*This ablation was run against a pre-box-regressor reference configuration measuring 0.163628, not against the shipped 0.258616. Absolute values are therefore historical; the relative deltas are what the ablation establishes.*
+
+**Finding.** Removing the lookahead costs **48.0% of sparse-track mAP** — equivalently, the 1-window lookahead delivers **+92.2% relative mAP on sparse sequences**. Dense sequences are unaffected, because a continuously visible target does not need future context.
+
+---
+
+## Detection example
+
+![EVK4 detection example](experiments/frames/fig1.png)
+
+EVK4 window, cropped. Green: ground truth. Orange: prediction with confidence and track ID. Rendered by `src/visualize.py`, which ships inside the submitted container.
+
+---
+
+## 13-dimensional candidate features
+
+For each candidate bounding box:
+
+| # | Feature | Meaning |
+|---|---|---|
+| 1 | `events` | Total events enclosed by the box |
+| 2 | `density` | Local event density (events / area) |
+| 3 | `area` | Box footprint in pixels (w × h) |
+| 4 | `extent_w` | Box width |
+| 5 | `extent_h` | Box height |
+| 6 | `aspect` | max(w,h) / max(min(w,h), 1.0) |
+| 7 | `hits` | Temporal persistence count across adjacent windows (1–3) |
+| 8 | `disp_prev` | Distance to nearest candidate at t−1 |
+| 9 | `disp_next` | Distance to nearest candidate at t+1 |
+| 10 | `speed` | Mean displacement, ½(disp_prev + disp_next) |
+| 11 | `dir_consistency` | Cosine similarity between successive trajectory vectors |
+| 12 | `static_frac` | Background activity frequency at the box centroid |
+| 13 | `local_bg` | Background event density in a 4-px dilated halo |
+
+---
+
+## Repository structure
+
+```
+├── config.yaml                 # Shipped pipeline configuration (global + per-sensor)
+├── Dockerfile                  # Offline submission container definition
+├── run.sh                      # Container entrypoint
+├── requirements.txt            # Eight pinned runtime dependencies
+├── AGENTS.md                   # Operating protocol and validation rules
+├── PROPOSAL.md                 # Technical proposal source
+├── models/
+│   ├── scorer_pregeom.joblib                   # Pass 2 candidate classifier (359,304 B)
+│   ├── scorer_objectness_pre_geometry.joblib   # Pass 3 window objectness gate (525,648 B)
+│   ├── box_regressor_arm2.joblib               # Pass 4 dual log-HGBR regressor (611,945 B)
+│   ├── scorer.joblib                           # Superseded; not referenced by config.yaml
+│   └── model_structure.json                    # Model metadata and hyperparameters
+├── experiments/
+│   ├── CONFIG_LEDGER.md        # Every configuration evaluated, with commit SHA
+│   ├── release_notes_v1.0.md   # Submission artifact provenance
+│   ├── convert_pdf.py          # PROPOSAL.md -> HTML
+│   ├── inspect_pdf.ps1         # HTML -> PDF with layout gates
+│   ├── make_fig2.py            # Architecture diagram generator
+│   └── frames/                 # Figures used by the proposal and this README
+└── src/
+    ├── common.py               # Event I/O, resolution inference, window slicing
+    ├── detector.py             # Morphology, percentile filtering, connected components
+    ├── static_map.py           # Continuous background activity map
+    ├── features.py             # Vectorized 13-D candidate feature extraction
+    ├── nms.py                  # IoU-based non-maximum suppression
+    ├── tracker.py              # Multi-window track association and ID maintenance
+    ├── pipeline.py             # Streaming processing engine
+    ├── infer.py                # Batch dataset CLI inference and latency logging
+    ├── metrics.py              # Canonical IoU and precision-recall metrics
+    ├── scoreboard.py           # Authoritative mAP@0.5 evaluation suite
+    ├── make_report.py          # Submission Excel metrics compiler
+    ├── report_xlsx.py          # Formatted XLSX writer
+    ├── validate_predictions.py # Prediction schema and coordinate validator
+    ├── visualize.py            # Headless annotated video renderer
+    ├── latency_bench.py        # Streaming per-window latency benchmark
+    ├── train_scorer.py         # Pass 2 classifier training
+    ├── train_box_regressor.py  # Pass 4 regressor training
+    ├── train_reranker.py       # Track association model training
+    ├── eval_box_arms.py        # Four-arm box-sizing ablation driver
+    ├── oracle_boxsize.py       # Ground-truth-dimension oracle profiler
+    ├── box_ceiling.py          # Box-geometry upper-bound analysis
+    ├── oracle_recall.py        # Multi-stage upper-bound recall profiler
+    ├── ablation_causal.py      # Causal (zero-lookahead) ablation suite
+    ├── component_rank.py       # Connected component rank profiling
+    ├── gt_occupancy.py         # Ground-truth window occupancy profiler
+    ├── gt_census.py            # Ground-truth box census
+    ├── analyze_gt.py           # Ground-truth distribution analysis
+    ├── diagnose_recall.py      # Recall loss attribution
+    ├── debug_dvx.py            # DVXplorer-specific diagnostics
+    ├── tune_threshold.py       # Confidence threshold tuning
+    ├── filter_preds.py         # Post-hoc confidence and top-K filter
+    ├── sweep.py                # Detector parameter sweep engine
+    ├── measure_interleaved_resizer.py  # Regressor batching cost measurement
+    ├── verify_batched_resizer.py       # Regressor batching equivalence check
+    ├── test_config_plumbing.py         # Config propagation tests
+    ├── test_feature_parity.py          # Feature extraction parity tests
+    └── test_pipeline_parity.py         # Research vs container parity tests
+```
+
+---
+
+## Quick start
+
+```bash
 git clone https://github.com/swarajladke/OrbitAI.git
 cd OrbitAI
 
-# Setup virtual environment
 python -m venv .venv
-# On Linux/macOS:
-source .venv/bin/activate
-# On Windows:
-.venv\Scripts\activate
+source .venv/bin/activate        # Linux/macOS
+# .venv\Scripts\activate         # Windows
 
-# Install dependencies
 pip install -r requirements.txt
 ```
 
-### 2. Run Batch Inference
-
-Generate predictions for all sequences in the dataset directory:
+**Batch inference**
 
 ```bash
 python -m src.infer --input_dir ../OrbitSight_Dataset/Training_sets --output_dir predictions --config config.yaml
 ```
 
-Output format for each sequence (emits 9 tab-separated fields across `<seq>_pred.txt`, `<seq>_bb_windows_40ms.txt`, and `<seq>.txt`):
+Each sequence emits nine tab-separated fields with a header row:
+
 ```tsv
 sequence_id	window_start_timestamp_us	window_end_timestamp_us	center_x	center_y	width	height	class_id	confidence
 2025_12_23_21_12_28_EVK4_mag5.2	1734988346000000	1734988346040000	320.0	240.0	52	56	0	0.8452
 ```
 
-### 3. Evaluate Scoreboard
+Field names 4–7 are `center_x`, `center_y`, `width`, `height` because the official `evaluate.py` reads them with `csv.DictReader` and requires exactly those keys. All nine fields appear in the order the challenge specifies.
 
-Evaluate authoritative mAP@0.5, Precision, Recall, and F1 across the train split:
+**Evaluate**
 
 ```bash
 python -m src.scoreboard --split train --pred-dir predictions --tag submission-v1
 ```
 
-### 4. Benchmark Streaming Latency
-
-Benchmark true streaming per-window execution times across sequences:
+**Benchmark latency**
 
 ```bash
-python -m src.latency_bench --dataset-dir ../OrbitSight_Dataset/Training_sets --config config.yaml --reps 3 --warmup-windows 20
+python -m src.latency_bench --dataset-dir ../OrbitSight_Dataset/Training_sets --config config.yaml --reps 5 --warmup-windows 20
 ```
 
-### 5. Video Visualization
-
-Render headless MP4 videos of 2D event accumulation frames overlaid with predictions (in orange, with confidence and track ID) and ground truth (in green). Supports all three sensor resolutions dynamically:
-- **EVK4**: $1280\times 720$
-- **DVXplorer**: $640\times 480$
-- **DAVIS346**: $346\times 260$
+**Render video**
 
 ```bash
 python -m src.visualize --npy path/to/events.npy --pred path/to/pred.txt --gt path/to/gt.txt --out video.mp4 --fps 25 --max-windows 300
@@ -305,150 +327,73 @@ python -m src.visualize --npy path/to/events.npy --pred path/to/pred.txt --gt pa
 
 ---
 
-## ⚙️ Locked Configuration (`config.yaml`)
-
-```yaml
-# Global baseline defaults (Cell d Final Shipping Configuration)
-percentile: 97.5
-min_events_in_box: 6
-open_kernel: 2
-dilate_kernel: 3
-min_hits: 2
-box_mode: "fixed"
-centroid_mode: "weighted"
-box_w: 18
-box_h: 18
-max_area_frac: 0.02
-nms_iou: 0.3
-conf_min: 0.30
-max_candidates_per_window: 1
-max_components_per_window: 64
-max_dist_frac: 0.04
-static_thresh: 0.5
-scorer_mode: "learned"
-scorer_path: "models/scorer_pregeom.joblib"
-objectness_mode: "gate"
-objectness_path: "models/scorer_objectness_pre_geometry.joblib"
-tracking_mode: "ids_only"
-
-# EVK4 (1280x720)
-EVK4:
-  percentile: 97.5
-  min_events_in_box: 8
-  open_kernel: 1
-  dilate_kernel: 3
-  min_hits: 2
-  box_mode: "fixed"
-  centroid_mode: "component"
-  box_w: 52
-  box_h: 56
-  max_area_frac: 0.03
-  min_dim: 20
-  max_dim: 80
-  extent_scale: 1.0
-  extent_pad: 4.0
-  nms_iou: 0.3
-  conf_min: 0.30
-  max_candidates_per_window: 1
-
-# DVXplorer (640x480)
-DVX:
-  percentile: 85.0
-  min_events_in_box: 6
-  open_kernel: 1
-  dilate_kernel: 3
-  min_hits: 2
-  box_mode: "fixed"
-  centroid_mode: "weighted"
-  box_w: 18
-  box_h: 18
-  max_area_frac: 0.05
-  min_dim: 12
-  max_dim: 60
-  extent_scale: 1.2
-  extent_pad: 4.0
-  nms_iou: 0.3
-  conf_min: 0.30
-  max_candidates_per_window: 1
-
-# DAVIS346 (346x260)
-DAVIS:
-  percentile: 97.0
-  min_events_in_box: 4
-  open_kernel: 1
-  dilate_kernel: 3
-  min_hits: 2
-  box_mode: "extent"
-  centroid_mode: "weighted"
-  box_w: 10
-  box_h: 12
-  max_area_frac: 0.02
-  min_dim: 4
-  max_dim: 30
-  extent_scale: 1.1
-  extent_pad: 2.0
-  nms_iou: 0.3
-  conf_min: 0.30
-  max_candidates_per_window: 1
-```
-
----
-
-## 🐳 Docker Submission Container
-
-OrbitSight is packaged as a self-contained offline container adhering strictly to the competition submission protocol:
+## Docker submission container
 
 ```bash
-# Build Docker image
 docker build -t orbitsight:latest .
 
-# Run inference offline (--network none)
 docker run --rm --network none \
   -v /absolute/path/to/OrbitSight_Dataset:/OrbitSight_dataset:ro \
   -v /absolute/path/to/work:/work \
-  -e TEAM_NAME=orbitsight \
   orbitsight:latest
 ```
 
-The container automatically reads from `/OrbitSight_dataset` (or `$ORBITSIGHT_DATASET_DIR`) and generates the submission directory `/work/<TEAM_NAME>/<DDMMYYYY>` containing:
-- 63 `.txt` prediction files (21 sequences $\times$ 3 file name conventions).
-- `Evaluation_Metrics.xlsx` summary report.
+`run.sh` defaults to `TEAM_NAME=OrbitAI` and requires no environment variables, because the evaluation harness passes none. Output goes to `/work/OrbitAI/<DDMMYYYY>` and contains:
 
-### Verified Container Execution
+- **63 `.txt` prediction files** — 21 sequences × 3 filename conventions (`<seq>.txt`, `<seq>_pred.txt`, `<seq>_bb_windows_40ms.txt`), where `<seq>.txt` is the challenge-conformant name
+- **`Evaluation_Metrics.xlsx`** (7,341 B)
 
-The container has been verified across all 21 dataset sequences (143,750 windows):
-- **Offline Protocol**: Executed with `--network none` exiting with code `0`.
-- **Output Validation**: Emitted all 63 `.txt` prediction files and `Evaluation_Metrics.xlsx` (7,341 B) to `/work/orbitsight/<DDMMYYYY>`. All 63 files passed `src.validate_predictions` with zero schema or coordinate errors.
-- **No-GT Robustness**: Verified on ground-truth-free dataset mounts (`*_bb_windows_40ms.txt` removed); `make_report` generates a valid non-zero `Evaluation_Metrics.xlsx` (5,526 B) summarizing prediction metadata without crashing, satisfying TII's actual offline evaluation condition.
-- **Harness Parity**: All 17 training-sequence prediction counts in the container run are **byte-identical** to the research scoreboard run (11,980 predictions).
-- **All-21 In-Container Metrics**:
-  - **mAP@0.5**: `0.190765`
-  - **Precision**: `0.464583`
-  - **Recall**: `0.352155`
-  - **F1 Score**: `0.400631`
-  - **TP / FP / FN**: `7,877 / 9,078 / 14,491`
-- **Held-out Test Split *(Derived by subtraction across 4 test sequences)***:
-  - **mAP@0.5**: `0.299820`
-  - **Precision**: `0.566230` *(+0.090 gain vs baseline)*
-  - **Recall**: `0.398110`
-  - **F1 Score**: `0.467270` *(+0.028 gain vs baseline)*
-  - **TP / FP / FN**: `2,817 / 2,158 / 4,259` *(FP reduced by 32%)*
-- **Shipped Image Artifact**: `image.tar` is **189,551,104 bytes** (180.8 MB).
+Mirror directories `/work/orbitai`, `/work/orbitsight` and `/work/OrbitSight` are also written as a defensive measure against team-name casing mismatch.
 
----
+### Verified container execution
 
-## 📜 Event File Format Specifications
+Across all 21 sequences (143,750 windows):
 
-Input event files (`*_labeled_events.npy`) are structured 2D NumPy arrays:
-- **Column 0**: `x` coordinate (pixels)
-- **Column 1**: `y` coordinate (pixels)
-- **Column 2**: `polarity` (-1 or +1 / 0 or 1)
-- **Column 3**: `timestamp_us` (Absolute timestamp in microseconds)
-- **Column 4**: `label` (0 = noise, 1 = target satellite/debris)
-- **Column 5**: `relative_timestamp_us` (Window-relative offset in microseconds)
+- **Offline**: executed with `--network none`, exit code `0`
+- **Schema**: all 63 files pass `src.validate_predictions` with zero schema or coordinate errors
+- **No-ground-truth robustness**: verified on dataset mounts with `*_bb_windows_40ms.txt` removed; `make_report` still writes a valid `Evaluation_Metrics.xlsx` rather than crashing, which matches the actual offline evaluation condition
+- **Determinism**: six end-to-end runs produced identical detection counts; the three runs of the shipped configuration produced identical mAP to six decimal places
+- **Harness parity**: container prediction counts are byte-identical to the research scoreboard run
+
+### Submitted artifact
+
+| Property | Value |
+|---|---|
+| Release tag | `v1.0-submission` |
+| Archive | 188,539,903 bytes gzipped / 582,660,096 bytes raw |
+| SHA-256 | `7bb765b28dd8e600c4f82969fadfd1449a3b4c57f5cbd76749bb2e323c12c722` |
 
 ---
 
-## ⚖️ License
+## Measurement protocol
 
-This project is licensed under the MIT License.
+Every number in this README came from a run whose output was pasted verbatim, not summarised. The standing rules:
+
+- **Arm 0 is retained permanently as a do-nothing control** in every box-sizing comparison.
+- **Failed arms are published, not deleted.** Arm 1 lost mAP and remains in the ablation table above.
+- **Configuration selection used the 17 training sequences only.** Test-split figures are derived by subtraction.
+- **Every configuration evaluated is recorded** in `experiments/CONFIG_LEDGER.md` with its commit SHA.
+- **Run-to-run container timing is never quoted as a guarantee.** Per-window means have ranged from 9.65 to 25.50 ms across six runs; only the p99 distribution is reported.
+
+---
+
+## Event file format
+
+Input files (`*_labeled_events.npy`) are structured 2D NumPy arrays:
+
+| Column | Field | Units |
+|---|---|---|
+| 0 | `x` | pixels |
+| 1 | `y` | pixels |
+| 2 | `polarity` | −1/+1 or 0/1 |
+| 3 | `timestamp_us` | absolute microseconds |
+| 4 | `label` | 0 = noise, 1 = target |
+| 5 | `relative_timestamp_us` | window-relative microseconds |
+
+`class_id` is `0` for every prediction. The challenge defines a single RSO class, and we do not infer a taxonomy we cannot validate.
+
+---
+
+## License
+
+MIT.
