@@ -55,7 +55,7 @@ Sub-split behaviour shows the gain is largest exactly where the baseline was wea
 
 ## 3. Value Proposition and Competitive Positioning
 
-**Every number is reproducible, and the artifact is the evidence.** The container has been run six times with identical detection counts, the last three on the shipped configuration with identical mAP to six decimals. The submitted image is built from the exact commit in the repository, and in-process metrics agree with the official evaluator to 5.6e-17. Nothing here is estimated. Two configurations that improved precision, recall and F1 while *reducing* mAP were diagnosed rather than shipped; that diagnosis - the metric was ranking-limited, not recall-limited - produced the +49.1% gain in all-21 mAP.
+**Every number is reproducible, and the artifact is the evidence.** The container has been run six times with identical detection counts, the last three on the shipped configuration with identical mAP to six decimals. The submitted image is built from the exact commit in the repository, and in-process metrics agree with the official evaluator to 5.55e-17. Nothing here is estimated. Two configurations that improved precision, recall and F1 while *reducing* mAP were diagnosed rather than shipped; that diagnosis - the metric was ranking-limited, not recall-limited - produced the +49.1% gain in all-21 mAP.
 
 **CPU-only and genuinely offline.** Three gradient-boosted tree models totalling 1.5 MB, eight pinned dependencies, no GPU, no network. Cold start is sub-second - a deployable configuration on the stated evaluation hardware, not a research prototype requiring accelerators.
 
@@ -97,9 +97,19 @@ Per-sensor, Arm 2 improves EVK4 0.612170 → 0.770544, DVX 0.121921 → 0.225114
 ### 4.4 Visualisation and outputs
 
 A visualisation tool renders annotated video at all three sensor resolutions with ground-truth and predicted boxes, confidences and track identifiers. Predictions are tab-separated with a header row in the evaluator's field names, one row per detection, `class_id = 0` throughout - the challenge defines a single RSO class and we do not infer a taxonomy we cannot validate.
-<img src="C:/Users/Vicky/Desktop/OrbitSight/OrbitSight_Research/experiments/frames/fig1.png">
+<img src="experiments/frames/fig1.png">
 **Figure 1.** EVK4 window, cropped. Green: ground truth. Orange: prediction with confidence and track ID. Rendered by `src/visualize.py`, which ships inside the submitted image.
 
+### 4.5 Architecture and failure modes
+<img src="experiments/frames/fig2_pipeline.png">
+**Figure 2.** The shipped pipeline; counts and AUCs are the measured values from sections 2 and 4.
+
+Known failure modes, characterised rather than omitted:
+
+- **Compute p99 over budget.** `DVX_NOAA6` 84.67 ms, `EVK4_mag7.3` 77.76 ms and `EVK4_mag5.2` 58.73 ms: the densest and the two highest-resolution streams. Per-sensor decimation is the untested next lever.
+- **Regressor holdout gap.** No EVK4 sequence sits in the validation holdout, so the EVK4 per-sensor gain is the least independently supported figure in this proposal.
+- **Sizing without centroid correction.** Arm 1 raised precision, recall and F1 yet lost mAP: 1,087 detections fell from IoU 0.50-0.55 to 0.40-0.49. Published rather than omitted.
+- **Sparse-sequence weakness.** The ten sequences with 43 ground-truth boxes or fewer remain the weakest regime; Arm 2 lifts mAP from 0.100600 to 0.226600, still below the dense-sequence 0.304353.
 ## 5. Team Capacity
 
 This is a solo entry. The author is in the final semester of an MCA at D. Y. Patil Institute of MCA and Management, Pune (Savitribai Phule Pune University), following a BCA from the same university. From 1 December 2025 to 30 May 2026 he worked as an Applied AI Engineer at Ovva Tech, where he built an AI-driven recruitment platform (React/Next.js with a Flask backend) spanning MCQ, coding and interview assessment modules, including a proctoring subsystem migrated from a hosted vision API to local CPU-based OpenCV face detection.
@@ -114,6 +124,6 @@ Three public repositories predate this Challenge, which the author learned of on
 
 AirWrite (first commit 19 December 2025) is a real-time computer-vision application in Python using OpenCV and MediaPipe: webcam capture, per-frame hand-landmark detection, temporal smoothing for tracking stability, and a gesture state machine driving on-screen interaction. It is the closest antecedent to OrbitSight's per-window detection and cross-window temporal association.
 
-The Automated Recruitment System (May-June 2026), built during that role, ships with a project report, test plan, data-flow and class diagrams, and a CSV test-case matrix. Its proctoring module was deliberately migrated from a hosted vision API to local OpenCV face detection on CPU, the same offline-first constraint this Challenge imposes.
+The Automated Recruitment System (begun May 2026 during that role) ships with a project report, test plan, data-flow and class diagrams, and a CSV test-case matrix. Its proctoring module was deliberately migrated from a hosted vision API to local OpenCV face detection on CPU, the same offline-first constraint this Challenge imposes.
 
 Neural-Networks (from 14 April 2026) is a continual-learning research codebase. A custom architecture was built, evaluated against transformer baselines, and then measured against standard protocols. Those measurements did not support the architecture: joint offline training was found to lose to no training at all on the internal benchmark (adaptation gap -6.00 pp), so the benchmark was retired and the work moved to Split-CIFAR-100 with Class-IL R[t,i] matrix evaluation and orthogonal gradient projection. The repository retains the negative results and the retractions in full. Development used a branch-and-pull-request workflow; implementation is agent-executed under the author's direction, with experiment design, protocol rules and verification retained by the author.
