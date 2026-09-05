@@ -295,101 +295,112 @@ metadata, and an `OrbitSight_dataloader` folder.
 
 ## 15. Master Compliance Checklist
 
-Mark each `PASS` / `FAIL` / `UNMEASURED`. No cell may be left blank or filled
-with a plausible guess.
+Marked `PASS` / `FAIL` / `UNMEASURED` on 2026-09-05 against commit `583f4bf` and
+the submitted image in release `v1.0-submission`. Where a checklist line contains
+two clauses and the verdicts differ, both are given. No cell is left blank.
 
 ### Submission mechanics
-- [ ] Registered on challenge platform
-- [ ] Participation form complete
-- [ ] Image exported via `docker save`, `.tar` or `.tar.gz`
-- [ ] Entrypoint non-interactive, self-terminating
-- [ ] Runs successfully with `--network none`
-- [ ] Reads from `/OrbitSight_dataset` (read-only mount)
-- [ ] Writes to `/work/teamName/DDMMYYYY`
-- [ ] Prediction files named `<sequencename>.txt`
-- [ ] Rows contain all 9 required fields in the required order
-- [ ] `sequence_id` emitted
-- [ ] `class_id` emitted, value justified from the official dataloader
-- [ ] `Evaluation_Metrics.xlsx` written to the same output folder
-- [ ] Model weights, structure file, and inference script baked into the image
-- [ ] No runtime network calls of any kind
-- [ ] 5-page PDF proposal, all 6 required sections present
-- [ ] All deliverables in English
+| Item | Verdict | Evidence |
+|---|---|---|
+| Registered on challenge platform | PASS | Team `OrbitAI`, team ID 1149 |
+| Participation form complete | FAIL | 58 percent complete on 2026-09-05. Docker image link, proposal upload, referral question and the four declaration checkboxes are outstanding. |
+| Image exported via `docker save`, `.tar` or `.tar.gz` | PASS | `image.tar.gz`, 188,539,903 bytes gzipped, 582,660,096 bytes raw, SHA-256 `7bb765b2...c722` |
+| Entrypoint non-interactive, self-terminating | PASS | `CMD ["sh","run.sh"]`. Unattended 21-sequence run completed in 48.08 minutes wall clock with no input. |
+| Runs successfully with `--network none` | PASS | Full 21-sequence container run executed under `--network none` |
+| Reads from `/OrbitSight_dataset` (read-only mount) | PASS | `DATASET_DIR="${ORBITSIGHT_DATASET_DIR:-/OrbitSight_dataset}"` in the `run.sh` baked into the image |
+| Writes to `/work/teamName/DDMMYYYY` | PASS, with a declared deviation | Writes `/work/OrbitAI/DDMMYYYY`. `run.sh` also writes three case and spelling mirrors of the same output. The official text names one folder. See 16.2 item 6. |
+| Prediction files named `<sequencename>.txt` | PASS | 63 `.txt` files for 21 sequences: the required `<seq>.txt` plus two additional variants that do not replace it |
+| Rows contain all 9 required fields in the required order | PASS | Tab-separated header `sequence_id`, `window_start_timestamp_us`, `window_end_timestamp_us`, `center_x`, `center_y`, `width`, `height`, `class_id`, `confidence` |
+| `sequence_id` emitted | PASS | Column 1 of every row, filename stem |
+| `class_id` emitted, value justified from the official dataloader | PASS emitted / UNMEASURED justified | Emitted as `0`. The official text leaves permitted values `UNSPECIFIED` and the dataloader defines no class taxonomy, so `0` is a single-class convention rather than a derived value. |
+| `Evaluation_Metrics.xlsx` written to the same output folder | PASS | 7,341 bytes, written by `src/report_xlsx.py` alongside the prediction files |
+| Model weights, structure file, and inference script baked into the image | PASS | `models/scorer_pregeom.joblib` 359,304 B, `models/scorer_objectness_pre_geometry.joblib` 525,648 B, `models/box_regressor_arm2.joblib` 611,945 B, totalling 1,496,897 B, plus `models/model_structure.json` and `src/infer.py` |
+| No runtime network calls of any kind | PASS | Eight pinned dependencies, no network client in the runtime path, verified by the offline container run |
+| 5-page PDF proposal, all 6 required sections present | PASS | `PROPOSAL.pdf`, 417,753 bytes, 5 pages, sections 1 through 6 present |
+| All deliverables in English | PASS | Proposal, README and portal fields are English throughout |
 
 ### Capability coverage
-- [ ] Detection in noisy, low-light feeds
-- [ ] Classification against background noise/artifacts
-- [ ] Detection across varying magnitude levels (dim → bright)
-- [ ] **Tracking** (not just per-window detection)
-- [ ] Multi-resolution sensor compatibility
-- [ ] **Visualization tool**
-- [ ] End-to-end real-time pipeline, raw stream → detection → visualization
+| Item | Verdict | Evidence |
+|---|---|---|
+| Detection in noisy, low-light feeds | PASS | mAP@0.5 0.284406 across all 21 sequences, all of which are low-light telescope captures |
+| Classification against background noise/artifacts | PASS, binary only | A learned candidate scorer (ROC-AUC 0.930) and a window-objectness gate (ROC-AUC 0.889, PR-AUC 0.921) separate target from noise. No multi-class object taxonomy is produced; see 16.2 item 8. |
+| Detection across varying magnitude levels (dim to bright) | PASS | Sequences span magnitude 5.2 to 7.3; per-sensor operating points are separately tuned |
+| Tracking (not just per-window detection) | PASS, limited | `src/tracker.py` with `tracking_mode: "ids_only"` assigns persistent identities across adjacent 40 ms windows. No orbital state estimation or multi-frame trajectory fitting. |
+| Multi-resolution sensor compatibility | PASS | EVK4 1280x720, DVX 640x480, DAVIS 346x260, resolved by exact resolution match with nearest-diagonal fallback |
+| Visualization tool | PASS | `src/visualize.py`, 6,304 bytes, ships inside the image and produced the detection example in the proposal |
+| End-to-end real-time pipeline, raw stream to detection to visualization | PASS detection / FAIL visualization in-path | Detection and tracking run inside the 40 ms window budget. Visualization is an offline post-hoc renderer and is not part of the real-time path. |
 
 ### Performance evidence
-- [ ] mAP measured and reported
-- [ ] Precision, recall, F1 measured and reported
-- [ ] Latency measured on CPU-only hardware comparable to i9-12900H
-- [ ] p99 and maximum per-window latency under 40 ms (not just the mean)
-- [ ] Throughput and total runtime measured
-- [ ] Ablation analysis of alternative model architectures completed
-- [ ] Generalization evidence that does not rely on tuning against the test split
+| Item | Verdict | Evidence |
+|---|---|---|
+| mAP measured and reported | PASS | 0.284406 all-21, 0.258616 train-17, 0.394014 derived test-4 |
+| Precision, recall, F1 measured and reported | PASS | 0.623120 / 0.472327 / 0.537345 all-21, from 10,565 TP, 6,390 FP, 11,803 FN |
+| Latency measured on CPU-only hardware comparable to i9-12900H | PASS CPU-only / UNMEASURED comparability | Measured CPU-only on the development machine. No benchmark has been run on an i9-12900H, so hardware equivalence is asserted nowhere. |
+| p99 and maximum per-window latency under 40 ms (not just the mean) | FAIL | Compute p99 is under 40 ms on 18 of 21 sequences over 5 repetitions with 20 warmup windows. Maximum per-window latency has never been reported. Three sequences exceed the budget at p99. |
+| Throughput and total runtime measured | PASS | 143,750 windows processed, 48.08 minutes wall clock, RSS 114.3 to 130.7 MB |
+| Ablation analysis of alternative model architectures completed | FAIL | The shipped four-arm ablation compares box-sizing strategies inside one architecture. No SNN, CNN or graph neural network baseline has been measured against the CPU-only budget. This is the largest single scoring gap; see 16.2 item 1. |
+| Generalization evidence that does not rely on tuning against the test split | PASS | All operating points were selected on the 17 training sequences only. The 4 test sequences were never used for selection. |
 
 ### Documentation
-- [ ] Architecture diagram
-- [ ] Training curves
-- [ ] Detection example visualizations
-- [ ] **Failure case** visualizations
-- [ ] README covering training environment and exact reproduction commands
-- [ ] Limitations explicitly stated
+| Item | Verdict | Evidence |
+|---|---|---|
+| Architecture diagram | PASS | Figure 2 in the proposal, plus a flowchart in `README.md` |
+| Training curves | FAIL | Not produced and not producible in the usual sense: all three shipped models are gradient-boosted trees, so no epoch-wise loss curve exists. ROC-AUC and PR-AUC figures are reported instead. Recorded as a gap rather than substituted silently. |
+| Detection example visualizations | PASS | Figure 1 in the proposal, rendered by `src/visualize.py` |
+| Failure case visualizations | PASS documented / FAIL rendered | Four failure modes are characterised with measured evidence in proposal section 4.5. None is rendered as an image. |
+| README covering training environment and exact reproduction commands | PASS | `README.md` rewritten at commit `583f4bf`, including quick start, container build and the commands to regenerate per-sequence breakdowns |
+| Limitations explicitly stated | PASS | Proposal section 4.5, the README disclosure and latency-semantics sections, and section 16.2 below |
 
 ---
 
-## 16. OUR ASSESSMENT — NOT OFFICIAL
+## 16. INTERNAL ASSESSMENT - NOT OFFICIAL
 
-Everything below this line is internal analysis dated 2026-08-20, derived from
-reading `README.md`, `AGENTS.md`, `Dockerfile`, and the `src/` file listing.
-It is not part of the official challenge text and may be wrong. Verify before
-acting.
+Everything below this line is internal analysis. It is not part of the official
+challenge text and does not override sections 1 through 14.
 
-### 16.1 Suspected non-compliance (requires verification)
-| Item | Official requirement | Apparent current state | Severity |
-|---|---|---|---|
-| Input path | `/OrbitSight_dataset` | `/dataset` per Dockerfile | Blocking |
-| Output path | `/work/teamName/DDMMYYYY` | `/predictions` per Dockerfile | Blocking |
-| Filenames | `<sequencename>.txt` | `*_pred.txt` per README | Blocking |
-| Row fields | 9 fields | 7 documented in README | Blocking |
-| `sequence_id` | Required | Not documented | Blocking |
-| `class_id` | Required | Not documented | Blocking |
-| `Evaluation_Metrics.xlsx` | Required in output folder | `src/report_xlsx.py` exists, output location unverified | High |
-| Visualization tool | Required capability + scoring criterion | No visualization module in `src/` | High |
-| Tracking | Required throughout statement | ±1-window association as a feature only; no track output | High |
-| Classification | Required capability | Binary target/noise scoring only | Medium |
-| Latency on target HW | <40 ms on i9-12900H, CPU-only | 15.30 ms/window on unstated hardware; tail latency unmeasured | Medium |
-| Offline operation | No internet | Unverified | Medium |
-| README accuracy | Part of scored documentation | Quick Start references `OrbitSight_Research/` subdir; actual repo root is flat. `LICENSE` linked but absent from root listing | Low |
+**Revised:** 2026-09-05, against commit `583f4bf`.
 
-### 16.2 Strategic notes
-- mAP is **one of five** criteria with unstated weights. Optimizing it alone
-  leaves entire criteria unaddressed.
-- Technical Innovation explicitly names SNNs / graph NNs / hybrid event-frame
-  models. A connected-components detector plus a gradient-boosting re-scorer is
-  unlikely to score well on architectural novelty **unless** paired with a
-  rigorous ablation showing the alternatives lose on the CPU-only latency budget.
-  An honest, well-evidenced negative result is a valid answer to this criterion.
-- Finalists are re-scored on a **new unseen dataset**. Operating points selected
-  by grid-sweeping the 17 training sequences carry overfitting risk. Prefer
-  leave-one-sequence-out grouped validation for any parameter selection.
-- Criterion 10.5 explicitly rewards articulating **limitations**. Hiding weak
-  results is scored against, not for.
-- Visualization is currently the largest single scoring gap and is comparatively
-  cheap to build.
+The 2026-08-20 revision of this section listed thirteen suspected
+non-compliances, six of them marked blocking, inferred from reading the README
+and the Dockerfile rather than from running anything. Eleven have since been
+closed by measurement. This revision records what each gap was and what closed
+it, so the closure is auditable instead of assumed, and states plainly what is
+still open.
 
-### 16.3 Open questions to resolve
-- [ ] Field delimiter for prediction rows — comma or tab?
-- [ ] Header row in prediction files — required, optional, or forbidden?
-- [ ] Valid `class_id` values and whether ground truth carries class labels
-- [ ] Required schema/sheet layout of `Evaluation_Metrics.xlsx`
-- [ ] Whether `sequence_id` is the directory name, filename stem, or an index
-- [ ] Whether test-sequence predictions must be included alongside training ones
-- [ ] Exact team name string to use in the `/work/teamName/` path
-- [ ] Whether evaluators run sequences in parallel (affects latency tail)
+### 16.1 Gap ledger - recorded 2026-08-20, status 2026-09-05
+| Gap as originally recorded | Status | What closed it |
+|---|---|---|
+| Input path read `/dataset` | CLOSED | `run.sh` inside the built image reads `/OrbitSight_dataset`; confirmed by reading the file out of the container |
+| Output path wrote `/predictions` | CLOSED | Writes `/work/OrbitAI/DDMMYYYY`; verified by a full container run |
+| Prediction filenames were `*_pred.txt` only | CLOSED | The required `<sequencename>.txt` is emitted for all 21 sequences |
+| Rows carried 7 fields | CLOSED | All 9 official fields verified present in the official order |
+| `sequence_id` undocumented | CLOSED | Emitted and documented |
+| `class_id` undocumented | CLOSED as emitted | Emitted as `0`; the value justification remains UNMEASURED because the official text specifies no value set |
+| `Evaluation_Metrics.xlsx` location unverified | CLOSED | 7,341 bytes, written into the same output folder |
+| No visualization module existed | CLOSED | `src/visualize.py` ships in the image and produced the proposal detection figure |
+| Tracking emitted no persistent identities | PARTIALLY CLOSED | `src/tracker.py` with `tracking_mode: "ids_only"` emits persistent cross-window identities. No orbital state estimation. |
+| Classification was binary target/noise only | OPEN BY DESIGN | Unchanged, and appropriate: the official text specifies no class taxonomy and ground truth carries none |
+| Latency was a single mean on unstated hardware | PARTIALLY CLOSED | Now p99 over 5 repetitions across all 21 sequences. Maximum per-window latency and evaluation-hardware equivalence remain open. |
+| Offline operation unverified | CLOSED | Full run under `--network none` |
+| README inaccurate, `LICENSE` apparently absent | CLOSED | `README.md` rewritten at `583f4bf`; `LICENSE` is present at the repository root |
+
+### 16.2 Gaps still open, held open deliberately
+1. **No architecture-level ablation.** Criterion 10.1 rewards ablation of alternative models and names SNNs, graph neural networks and hybrid event-frame models. The shipped four-arm ablation varies box sizing within one architecture, which is not the same claim. The honest position is that no neural baseline has been timed against the CPU-only 40 ms budget, so the "no neural network" decision is argued from first principles and from a 1,496,897-byte model footprint rather than from a measured head-to-head.
+2. **Three sequences exceed the latency budget at p99:** 84.67 ms, 77.76 ms and 58.73 ms, on the densest and the two highest-resolution streams. Per-sensor decimation is the untested next lever.
+3. **Maximum per-window latency is unreported.** Only p99 is measured.
+4. **Evaluation-hardware equivalence is not established.** No measurement exists on an i9-12900H.
+5. **Training curves do not exist** for gradient-boosted trees and no substitute has been claimed as one.
+6. **Four output directories are written where the specification names one.** Retained on purpose: a team-name mismatch scores zero with no visible error, whereas duplicate folders are visible to a human reader. The risk accepted is that recursive ingestion could double-count detections and depress precision silently.
+7. **The test-4 metrics are derived**, computed as the residual of all-21 against train-17, not from an independent evaluator run restricted to the test split.
+8. **Only binary target/noise discrimination is performed.** No object-class output.
+9. **Failure modes are documented in prose, not rendered as imagery.**
+
+### 16.3 Open questions resolved since 2026-08-20
+- **Field delimiter:** tab. The official `evaluate.py` parses with `csv.DictReader`.
+- **Header row:** required, and the column names must be `center_x`, `center_y`, `width`, `height`. This differs from the prose in the challenge brief; the evaluator, not the prose, is authoritative. Renaming these columns causes a `KeyError` and a zero score.
+- **`class_id`:** emitted as `0` under a single-class convention.
+- **Team name in the `/work` path:** `OrbitAI`, the registered team name.
+- **`sequence_id` form:** the filename stem is used.
+
+Still unresolved: the required schema of `Evaluation_Metrics.xlsx`, and whether
+evaluators run sequences in parallel, which would change the latency tail.
